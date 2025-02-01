@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
-from torch.nn import Linear, Dropout
+from torch.nn import Linear, Dropout, ReLU, Tanh, BatchNorm1d, LayerNorm
 from torch.nn.functional import softmax, sigmoid
+from torchvision.models import resnet50, ResNet50_Weights
 
 class NONA(nn.Module):
     '''
@@ -46,7 +47,9 @@ class NONA_NN(nn.Module):
         layer_dims = [self.input_size] + self.hl_sizes
         self.fcn = nn.ModuleList(Linear(layer_dims[i], layer_dims[i+1], dtype=torch.float64, device=self.device) for i in range(len(layer_dims)-1))
         
-        self.dropout = Dropout(0.2)
+        self.activation = Tanh()
+        self.norms = nn.ModuleList(LayerNorm(layer_dims[i+1], dtype=torch.float64) for i in range(len(layer_dims)-1))
+        # self.dropout = Dropout(0.2)
 
         if self.classifier=='nona':
             self.output = NONA(similarity=self.similarity)
@@ -55,15 +58,48 @@ class NONA_NN(nn.Module):
             self.output = Linear(layer_dims[-1], 1, dtype=torch.float64, device=self.device)
 
     def forward(self, x, x_neighbors, y):
-        for layer in self.fcn:
-            x = self.dropout(layer(x))
+        for layer, norm in zip(self.fcn, self.norms):
+            x = norm(self.activation(layer(x)))
 
             if self.classifier=='nona':    
-                x_neighbors = layer(x_neighbors)
+                # try normalizing with the learned test params and
+                # try with unlearned params
+                x_neighbors = norm(self.activation(layer(x_neighbors)))
         
         if self.classifier=='nona':
-            return self.output(x, x_neighbors, y)
+            return torch.clip(self.output(x, x_neighbors, y), 0,torch.max(y))
         
         elif self.classifier=='dense':
             x = self.output(x)
-            return sigmoid(x).squeeze()
+            return sigmoid(x)#.squeeze()
+    
+# class NONA_Res(nn.Module):
+#     def __init__(self, input_size, similarity='euclidean', classifier='nona'):
+#         super(NONA_NN, self).__init__()
+#         self.input_size = input_size
+#         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+#         self.similarity = similarity
+#         self.classifier = classifier # for benchmarking
+
+        
+#         self.dropout = Dropout(0.2)
+
+#         if self.classifier=='nona':
+#             self.output = NONA(similarity=self.similarity)
+        
+#         elif self.classifier=='dense':
+#             # self.output = Linear(layer_dims[-1], 1, dtype=torch.float64, device=self.device)
+
+#     def forward(self, x, x_neighbors, y):
+#         for layer in self.fcn:
+#             x = self.dropout(layer(x))
+
+#             if self.classifier=='nona':    
+#                 x_neighbors = layer(x_neighbors)
+        
+#         if self.classifier=='nona':
+#             return torch.clip(self.output(x, x_neighbors, y), 0,torch.max(y))
+        
+#         elif self.classifier=='dense':
+#             x = self.output(x)
+#             return sigmoid(x)#.squeeze()
