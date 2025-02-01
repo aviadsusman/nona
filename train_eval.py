@@ -151,7 +151,7 @@ def tune_xgb(X_train, X_test, y_train, y_test):
         estimator=xgb,
         param_grid=param_grid,
         scoring=scorer,
-        cv=5,
+        cv=4,
         verbose=1,
         n_jobs=-1)
 
@@ -181,7 +181,7 @@ def tune_knn(X_train, X_test, y_train, y_test):
         estimator=knn,
         param_grid=param_grid,
         scoring=scorer,
-        cv=5,
+        cv=4,
         verbose=1,
         n_jobs=-1
     )
