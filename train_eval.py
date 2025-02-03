@@ -70,7 +70,7 @@ def mlps_train_eval(X_tv, X_train, X_val, X_test, y_tv, y_train, y_test, y_val):
             scores[classifier_head] = [accuracy_score(np.round(y_hat_base.cpu().detach()), y_test.cpu().detach()), end-start]
 
         feats = X_train.shape[1]
-        model = NONA_NN(input_size=feats, hl_sizes=[feats//2, feats//4], classifier=classifier, similarity=similarity)
+        model = NONA_NN(input_size=feats, hl_sizes=[feats//2, feats//2], classifier=classifier, similarity=similarity, task=task, classes=classes)
         
         if dataset == 'bc':
             # class_counts = torch.bincount(y_train.to(torch.int))
@@ -203,6 +203,13 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
     dataset = args.dataset
+
+    if dataset == 'bc':
+        task = 'bin'
+        classes = 2
+    elif dataset == 'cifar':
+        task = 'multiclass'
+        classes = 10
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -213,7 +220,7 @@ if __name__ == '__main__':
 
         scores = mlps_train_eval(**data_dict)
         # scores['tuned xgb'] = tune_xgb(data_dict['X_tv'], data_dict['X_test'], data_dict['y_tv'], data_dict['y_test'])
-        scores['tuned knn'] = tune_knn(data_dict['X_tv'], data_dict['X_test'], data_dict['y_tv'], data_dict['y_test'])
+        # scores['tuned knn'] = tune_knn(data_dict['X_tv'], data_dict['X_test'], data_dict['y_tv'], data_dict['y_test'])
 
         for k,v in scores.items():
             print(f'{k}: {round(100*v[0],3)}% accuracy in {round(v[1],3)}s.')

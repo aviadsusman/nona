@@ -2,11 +2,11 @@
 #BSUB -P acc_pandeg01a
 #BSUB -q gpu
 #BSUB -R span[hosts=1]
-#BSUB -R v100
+#BSUB -R a10080g
 #BSUB -R rusage[mem=8000]
 #BSUB -n 1
 #BSUB -gpu num=1
-#BSUB -J bc
+#BSUB -J cifar
 #BSUB -W 4:00
 #BSUB -o /sc/arion/projects/pandeg01a/susmaa01/nona/outputs/outputs_%J.stdout
 #BSUB -eo /sc/arion/projects/pandeg01a/susmaa01/nona/outputs/outputs_%J.stderr
@@ -18,4 +18,4 @@ ml cuda/12.1.1
 ml cudnn/8.9.5-11
 export XLA_FLAGS=--xla_gpu_cuda_data_dir=/hpc/packages/minerva-centos7/cuda/12.0.1
 nvidia-smi
-python3 train_eval.py --data bc
+python3 train_eval.py --data cifar
