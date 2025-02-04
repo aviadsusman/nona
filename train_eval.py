@@ -17,6 +17,7 @@ import argparse
 import os
 import pickle as pkl
 from models import NONA, NONA_NN
+import time
 
 def get_data(seed, device):
     if dataset == 'bc':
@@ -36,22 +37,33 @@ def get_data(seed, device):
     dd['X_tv'], dd['X_test'], dd['y_tv'], dd['y_test'] = train_test_split(X, y, test_size=0.25, stratify=y, random_state=seed)
     dd['X_train'], dd['X_val'], dd['y_train'], dd['y_val'] = train_test_split(dd['X_tv'], dd['y_tv'], test_size=0.15, stratify=dd['y_tv'], random_state=seed)
 
-    # Equiv to adding non-parametric layernorm before linear layers to network.
     for data in dd:
-        if 'X' in data:
-            scaler = StandardScaler()
-            dd[data] = scaler.fit_transform(dd[data])
-        
-        dd[data] = torch.tensor(dd[data], dtype=torch.float64, device=device)
+        # Equiv to adding non-parametric layernorm before linear layers to network.
+        # if 'X' in data:
+        #     scaler = StandardScaler()
+        #     dd[data] = scaler.fit_transform(dd[data])
+        dd[data] = torch.Tensor(dd[data]) if type(dd[data]) != torch.Tensor else dd[data]
+        dd[data] = dd[data].to(dtype=torch.float64, device=device)
 
     return dd
 
-def mlps_train_eval(X_tv, X_train, X_val, X_test, y_tv, y_train, y_test, y_val):
+
+def decisions(y):
+    y_np = y.cpu().detach()
+    if y_np.shape[1] > 1:
+        return np.argmax(y_np, axis=1)
+    else:
+        return np.round(y_np)
+
+def mlps_train_eval(X_tv, X_train, X_val, X_test, y_tv, y_train, y_val, y_test):
     scores = {}
 
     learning_rate = 0.001
-    batch_size = 32
-    
+    if dataset == 'bc':
+        batch_size = 32
+    elif dataset == 'cifar':
+        batch_size = 64
+
     train_dataset = torch.utils.data.TensorDataset(X_train, y_train)
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
@@ -70,7 +82,7 @@ def mlps_train_eval(X_tv, X_train, X_val, X_test, y_tv, y_train, y_test, y_val):
             scores[classifier_head] = [accuracy_score(np.round(y_hat_base.cpu().detach()), y_test.cpu().detach()), end-start]
 
         feats = X_train.shape[1]
-        model = NONA_NN(input_size=feats, hl_sizes=[feats//2, feats//2], classifier=classifier, similarity=similarity, task=task, classes=classes)
+        model = NONA_NN(input_size=feats, hl_sizes=[feats//2, feats//4], classifier=classifier, similarity=similarity, task=task, classes=classes)
         
         if dataset == 'bc':
             # class_counts = torch.bincount(y_train.to(torch.int))
@@ -96,7 +108,7 @@ def mlps_train_eval(X_tv, X_train, X_val, X_test, y_tv, y_train, y_test, y_val):
                 batch_X, batch_y = batch_X.to(model.device), batch_y.to(model.device)
 
                 outputs = model(batch_X, batch_X, batch_y)
-                loss = criterion(outputs, batch_y)
+                loss = criterion(outputs, batch_y.long()) if dataset=='cifar' else criterion(outputs, batch_y)
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -112,7 +124,7 @@ def mlps_train_eval(X_tv, X_train, X_val, X_test, y_tv, y_train, y_test, y_val):
                 model.eval()
                 with torch.no_grad():
                     y_hat_val = model(X_val, X_train, y_train)
-                    acc_val = accuracy_score(np.round(y_hat_val.cpu().detach()), y_val.cpu().detach())
+                    acc_val = accuracy_score(decisions(y_hat_val), y_val.cpu().detach())
                     if acc_val > best_acc_val:
                         best_acc_val = acc_val
                         best_model_state = deepcopy(model.state_dict())
@@ -129,7 +141,8 @@ def mlps_train_eval(X_tv, X_train, X_val, X_test, y_tv, y_train, y_test, y_val):
         y_hat = model(X_test, X_train, y_train)
         end = time.time()
         
-        scores[f'{classifier_head} mlp'] =  [accuracy_score(np.round(y_hat.cpu().detach()), y_test.cpu().detach()), end-start]
+
+        scores[f'{classifier_head} mlp'] =  [accuracy_score(decisions(y_hat), y_test.cpu().detach()), end-start]
 
     return scores
 
@@ -220,7 +233,7 @@ if __name__ == '__main__':
 
         scores = mlps_train_eval(**data_dict)
         # scores['tuned xgb'] = tune_xgb(data_dict['X_tv'], data_dict['X_test'], data_dict['y_tv'], data_dict['y_test'])
-        # scores['tuned knn'] = tune_knn(data_dict['X_tv'], data_dict['X_test'], data_dict['y_tv'], data_dict['y_test'])
+        scores['tuned knn'] = tune_knn(data_dict['X_tv'], data_dict['X_test'], data_dict['y_tv'], data_dict['y_test'])
 
         for k,v in scores.items():
             print(f'{k}: {round(100*v[0],3)}% accuracy in {round(v[1],3)}s.')
@@ -228,7 +241,9 @@ if __name__ == '__main__':
         scores_list.append(scores)
 
 
-    results_path = f'results/{dataset}/scores.pkl'
+    scores_list.append("Removed hard-coded rescaling and changed last hidden layer from feat // 2 to feat // 4")
+
+    results_path = f'results/{dataset}/scores_{time.strftime("%m%d%H%M")}.pkl'
     results_dir = os.path.dirname(results_path)
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)

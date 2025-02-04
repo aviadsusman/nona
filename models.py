@@ -27,7 +27,7 @@ class NONA(nn.Module):
             sim = x @ torch.t(x_n)
         
         if torch.equal(x, x_n): # train
-            inf_id = torch.diag(torch.full((len(sim),), float('inf')))
+            inf_id = torch.diag(torch.full((len(sim),), float('inf'))).to(self.device)
             sim_scores = softmax(sim - inf_id, dim=1)
         
         else: # eval
@@ -50,7 +50,7 @@ class NONA_NN(nn.Module):
         self.fcn = nn.ModuleList(Linear(layer_dims[i], layer_dims[i+1], dtype=torch.float64, device=self.device) for i in range(len(layer_dims)-1))
         
         self.activation = Tanh()
-        self.norms = nn.ModuleList(BatchNorm1d(layer_dims[i+1], dtype=torch.float64) for i in range(len(layer_dims)-1))
+        self.norms = nn.ModuleList(BatchNorm1d(layer_dims[i+1], dtype=torch.float64, device=self.device) for i in range(len(layer_dims)-1))
 
         if self.classifier=='nona':
             self.output = NONA(similarity=self.similarity)
@@ -76,7 +76,7 @@ class NONA_NN(nn.Module):
             elif self.task == 'ordinal':
                 return torch.clip(self.output(x, x_n, y_n), 0, self.classes-1)
             elif self.task == 'multiclass':
-                y_n_ohe = one_hot(y_n).to(device, torch.float64)
+                y_n_ohe = one_hot(y_n.long()).to(self.device, torch.float64)
                 return torch.clip(self.output(x, x_n, y_n_ohe), 0, 1)
             
         

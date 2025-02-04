@@ -5,9 +5,9 @@
 #BSUB -R a10080g
 #BSUB -R rusage[mem=8000]
 #BSUB -n 1
-#BSUB -gpu num=1
-#BSUB -J cifar
-#BSUB -W 4:00
+#BSUB -gpu num=2
+#BSUB -J cifar 
+#BSUB -W 8:00
 #BSUB -o /sc/arion/projects/pandeg01a/susmaa01/nona/outputs/outputs_%J.stdout
 #BSUB -eo /sc/arion/projects/pandeg01a/susmaa01/nona/outputs/outputs_%J.stderr
 
