@@ -77,24 +77,20 @@ def mlps_train_eval(X_tv, X_train, X_val, X_test, y_tv, y_train, y_val, y_test):
 
         # Classify on raw data/representations
         if classifier == 'nona':
+            base_model = NONA(similarity=similarity, batch_norm=X_tv.shape[1])
             
-            tv_scaler = StandardScaler()
-            X_tv = tensor(tv_scaler.fit_transform(X_tv.cpu().detach()))
-            
-            test_scaler = StandardScaler()
-            X_test_base = tensor(test_scaler.fit_transform(X_test.cpu().detach()))
-            
-            base_model = NONA(similarity=similarity)
-
-            y_tv_ohe = tensor(one_hot(y_tv.long()))
             start = time.time()
-            y_hat_base = base_model(X_test_base, X_tv, y_tv_ohe)
+            if dataset == 'cifar':
+                y_tv_ohe = tensor(one_hot(y_tv.long()))
+                y_hat_base = base_model(X_test, X_tv, y_tv_ohe)
+            else:
+                y_hat_base = base_model(X_test, X_tv, y_tv)
             end = time.time()
             
             scores[classifier_head] = [accuracy_score(decisions(y_hat_base), y_test.cpu().detach()), end-start]
 
         feats = X_train.shape[1]
-        model = NONA_NN(input_size=feats, hl_sizes=[feats // 2, feats // 4, feats // 4], classifier=classifier, similarity=similarity, task=task, classes=classes)
+        model = NONA_NN(input_size=feats, hl_sizes=[feats // 2, feats // 4, feats // 8], classifier=classifier, similarity=similarity, task=task, classes=classes)
         
         if dataset == 'bc':
             # class_counts = torch.bincount(y_train.to(torch.int))
@@ -189,6 +185,13 @@ def tune_xgb(X_train, X_test, y_train, y_test):
     return [accuracy_score(y_hat_xgb, y_test), end-start]
 
 def tune_knn(X_train, X_test, y_train, y_test):
+
+    train_scaler = StandardScaler()
+    X_train = train_scaler.fit_transform(X_train.cpu().detach())
+
+    test_scaler = StandardScaler()
+    X_test = test_scaler.fit_transform(X_test.cpu().detach())
+    
     scorer = make_scorer(accuracy_score, greater_is_better=True) 
     
     knn = KNeighborsClassifier()
@@ -210,7 +213,7 @@ def tune_knn(X_train, X_test, y_train, y_test):
     )
 
     start = time.time()
-    grid_search.fit(X_train, y_train.squeeze())
+    grid_search.fit(X_train, y_train.cpu().detach().squeeze())
 
     best_knn = grid_search.best_estimator_
 
@@ -251,7 +254,7 @@ if __name__ == '__main__':
         scores_list.append(scores)
 
 
-    scores_list.append("Removed hard-coded rescaling and changed last hidden layer from feat // 2 to feat // 4")
+    scores_list.append("f//2 -> f//4 -> f//8")
 
     results_path = f'results/{dataset}/scores_{time.strftime("%m%d%H%M")}.pkl'
     results_dir = os.path.dirname(results_path)

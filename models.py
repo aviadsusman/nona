@@ -13,12 +13,20 @@ class NONA(nn.Module):
     In the notation of attention, Q = Fe(X), K = Fe(X_train) and V = y_train where Fe is an upstream feature extractor. 
     In the notation of KNN, k = |X_train|, metric = euclidean distance or dot product, weights = softmax.
     '''
-    def __init__(self, similarity='euclidean'):
+    def __init__(self, similarity='euclidean', batch_norm=None):
         super(NONA, self).__init__()
         self.similarity = similarity
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.batch_norm = batch_norm # Should be num_features of data matrix
+
+        if self.batch_norm is not None:
+            self.bn = BatchNorm1d(self.batch_norm, dtype=torch.float64, device=self.device)
    
     def forward(self, x, x_n, y):
+        if self.batch_norm is not None:
+            x = self.bn(x)
+            x_n = self.bn(x_n)
+
         if self.similarity == 'euclidean':
             sim = torch.cdist(x,x_n,p=2)
             sim = torch.max(sim) - sim

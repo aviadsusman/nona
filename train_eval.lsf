@@ -3,11 +3,11 @@
 #BSUB -q gpu
 #BSUB -R span[hosts=1]
 #BSUB -R a10080g
-#BSUB -R rusage[mem=8000]
+#BSUB -R rusage[mem=12000]
 #BSUB -n 1
 #BSUB -gpu num=1
-#BSUB -J cifar
-#BSUB -W 12:00
+#BSUB -J cifarrr
+#BSUB -W 24:00
 #BSUB -o /sc/arion/projects/pandeg01a/susmaa01/nona/outputs/outputs_%J.stdout
 #BSUB -eo /sc/arion/projects/pandeg01a/susmaa01/nona/outputs/outputs_%J.stderr
 
@@ -17,5 +17,5 @@ source .venv/bin/activate
 ml cuda/12.1.1
 ml cudnn/8.9.5-11
 export XLA_FLAGS=--xla_gpu_cuda_data_dir=/hpc/packages/minerva-centos7/cuda/12.0.1
-nvidia-smi
+# nvidia-smi
 python3 train_eval.py --data cifar
