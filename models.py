@@ -11,7 +11,7 @@ class NONA(nn.Module):
     To classify a sample, rank the nearness of all other samples 
     and use softmax to obtain probabilities for each class.
     In the notation of attention, Q = Fe(X), K = Fe(X_train) and V = y_train where Fe is an upstream feature extractor. 
-    In the notation of KNN, k = |X_train|, metric = euclidean distance or dot product, weights = softmax
+    In the notation of KNN, k = |X_train|, metric = euclidean distance or dot product, weights = softmax.
     '''
     def __init__(self, similarity='euclidean'):
         super(NONA, self).__init__()
@@ -49,8 +49,9 @@ class NONA_NN(nn.Module):
         layer_dims = [self.input_size] + self.hl_sizes
         self.fcn = nn.ModuleList(Linear(layer_dims[i], layer_dims[i+1], dtype=torch.float64, device=self.device) for i in range(len(layer_dims)-1))
         
-        self.activation = Tanh()
+        self.activation = Tanh() # Tanh allows for neagtive feature covariance between samples
         self.norms = nn.ModuleList(BatchNorm1d(layer_dims[i+1], dtype=torch.float64, device=self.device) for i in range(len(layer_dims)-1))
+        self.input_norm = BatchNorm1d(self.input_size, dtype=torch.float64, device=self.device)
 
         if self.classifier=='nona':
             self.output = NONA(similarity=self.similarity)
@@ -62,6 +63,11 @@ class NONA_NN(nn.Module):
                 self.output = Linear(layer_dims[-1], 1, dtype=torch.float64, device=self.device)
 
     def forward(self, x, x_n, y_n):
+        
+        x = self.input_norm(x)
+        if self.classifier=='nona':
+            x_n = self.input_norm(x_n)
+
         for layer, norm in zip(self.fcn, self.norms):
             x = norm(self.activation(layer(x)))
 

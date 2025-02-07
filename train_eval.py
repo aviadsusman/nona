@@ -7,6 +7,7 @@ from sklearn.metrics import accuracy_score, make_scorer
 from sklearn.model_selection import train_test_split
 import torch
 import torch.nn as nn
+from torch.nn.functional import one_hot
 import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
@@ -18,6 +19,11 @@ import os
 import pickle as pkl
 from models import NONA, NONA_NN
 import time
+
+def tensor(arr):
+    if type(arr) != torch.Tensor:
+        arr = torch.Tensor(arr)
+    return arr.to(dtype=torch.float64, device=device)
 
 def get_data(seed, device):
     if dataset == 'bc':
@@ -37,15 +43,9 @@ def get_data(seed, device):
     dd['X_tv'], dd['X_test'], dd['y_tv'], dd['y_test'] = train_test_split(X, y, test_size=0.25, stratify=y, random_state=seed)
     dd['X_train'], dd['X_val'], dd['y_train'], dd['y_val'] = train_test_split(dd['X_tv'], dd['y_tv'], test_size=0.15, stratify=dd['y_tv'], random_state=seed)
 
-    for data in dd:
-        # Equiv to adding non-parametric layernorm before linear layers to network.
-        # if 'X' in data:
-        #     scaler = StandardScaler()
-        #     dd[data] = scaler.fit_transform(dd[data])
-        dd[data] = torch.Tensor(dd[data]) if type(dd[data]) != torch.Tensor else dd[data]
-        dd[data] = dd[data].to(dtype=torch.float64, device=device)
+    dd_tensor = {k: tensor(v) for k,v in dd.items()}
 
-    return dd
+    return dd_tensor
 
 
 def decisions(y):
@@ -54,6 +54,7 @@ def decisions(y):
         return np.argmax(y_np, axis=1)
     else:
         return np.round(y_np)
+
 
 def mlps_train_eval(X_tv, X_train, X_val, X_test, y_tv, y_train, y_val, y_test):
     scores = {}
@@ -74,15 +75,26 @@ def mlps_train_eval(X_tv, X_train, X_val, X_test, y_tv, y_train, y_val, y_test):
         classifier = classifier_head.split(" ")[0]
         similarity = classifier_head.split(" ")[-1]
 
+        # Classify on raw data/representations
         if classifier == 'nona':
-            start = time.time()
+            
+            tv_scaler = StandardScaler()
+            X_tv = tensor(tv_scaler.fit_transform(X_tv.cpu().detach()))
+            
+            test_scaler = StandardScaler()
+            X_test_base = tensor(test_scaler.fit_transform(X_test.cpu().detach()))
+            
             base_model = NONA(similarity=similarity)
-            y_hat_base = base_model(X_test, X_tv, y_tv)
+
+            y_tv_ohe = tensor(one_hot(y_tv.long()))
+            start = time.time()
+            y_hat_base = base_model(X_test_base, X_tv, y_tv_ohe)
             end = time.time()
-            scores[classifier_head] = [accuracy_score(np.round(y_hat_base.cpu().detach()), y_test.cpu().detach()), end-start]
+            
+            scores[classifier_head] = [accuracy_score(decisions(y_hat_base), y_test.cpu().detach()), end-start]
 
         feats = X_train.shape[1]
-        model = NONA_NN(input_size=feats, hl_sizes=[feats//2, feats//4], classifier=classifier, similarity=similarity, task=task, classes=classes)
+        model = NONA_NN(input_size=feats, hl_sizes=[feats // 2, feats // 4, feats // 4], classifier=classifier, similarity=similarity, task=task, classes=classes)
         
         if dataset == 'bc':
             # class_counts = torch.bincount(y_train.to(torch.int))
@@ -105,8 +117,6 @@ def mlps_train_eval(X_tv, X_train, X_val, X_test, y_tv, y_train, y_val, y_test):
             train_loss = 0.0
 
             for batch_X, batch_y in train_loader:
-                batch_X, batch_y = batch_X.to(model.device), batch_y.to(model.device)
-
                 outputs = model(batch_X, batch_X, batch_y)
                 loss = criterion(outputs, batch_y.long()) if dataset=='cifar' else criterion(outputs, batch_y)
 
@@ -153,7 +163,7 @@ def tune_xgb(X_train, X_test, y_train, y_test):
     xgb = XGBClassifier(eval_metric='mlogloss')
 
     param_grid = {'n_estimators': [50, 100, 200]}
-        # 'max_depth': [3, 5, 7]
+    # 'max_depth': [3, 5, 7]
     #     'learning_rate': [0.01, 0.1, 0.2],
     #     'subsample': [0.8, 1.0],
     #     'colsample_bytree': [0.8, 1.0],
@@ -233,7 +243,7 @@ if __name__ == '__main__':
 
         scores = mlps_train_eval(**data_dict)
         # scores['tuned xgb'] = tune_xgb(data_dict['X_tv'], data_dict['X_test'], data_dict['y_tv'], data_dict['y_test'])
-        scores['tuned knn'] = tune_knn(data_dict['X_tv'], data_dict['X_test'], data_dict['y_tv'], data_dict['y_test'])
+        scores['tuned knn'] = tune_knn(data_dict['X_tv'].cpu(), data_dict['X_test'].cpu(), data_dict['y_tv'].cpu(), data_dict['y_test'].cpu())
 
         for k,v in scores.items():
             print(f'{k}: {round(100*v[0],3)}% accuracy in {round(v[1],3)}s.')
