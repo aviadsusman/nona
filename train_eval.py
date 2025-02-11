@@ -35,7 +35,7 @@ def get_data(seed, device):
         y = encoder.fit_transform(y.reshape(-1, 1))
     
     elif dataset == 'cifar':
-        X = torch.load('cifar/feature_extracted/X.pt')
+        X = torch.load('cifar/feature_extracted/resnet50/X.pt')
         y = torch.load('cifar/feature_extracted/y.pt')
 
     dd = {} # data dict
@@ -63,12 +63,12 @@ def mlps_train_eval(X_tv, X_train, X_val, X_test, y_tv, y_train, y_val, y_test):
     if dataset == 'bc':
         batch_size = 32
     elif dataset == 'cifar':
-        batch_size = 64
+        batch_size = 128
 
     train_dataset = torch.utils.data.TensorDataset(X_train, y_train)
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
-    for classifier_head in ['nona euclidean', 'nona dot', 'dense']:
+    for classifier_head in ['nona euclidean', 'nona dot', 'nona cos', 'dense']:
         
         print("Training and evaluating", classifier_head) 
         
@@ -86,11 +86,11 @@ def mlps_train_eval(X_tv, X_train, X_val, X_test, y_tv, y_train, y_val, y_test):
             else:
                 y_hat_base = base_model(X_test, X_tv, y_tv)
             end = time.time()
-            
+
             scores[classifier_head] = [accuracy_score(decisions(y_hat_base), y_test.cpu().detach()), end-start]
 
         feats = X_train.shape[1]
-        model = NONA_NN(input_size=feats, hl_sizes=[feats // 2, feats // 4, feats // 8], classifier=classifier, similarity=similarity, task=task, classes=classes)
+        model = NONA_NN(input_size=feats, hl_sizes=[feats // 4, feats // 4, feats // 4], classifier=classifier, similarity=similarity, task=task, classes=classes)
         
         if dataset == 'bc':
             # class_counts = torch.bincount(y_train.to(torch.int))
@@ -246,7 +246,7 @@ if __name__ == '__main__':
 
         scores = mlps_train_eval(**data_dict)
         # scores['tuned xgb'] = tune_xgb(data_dict['X_tv'], data_dict['X_test'], data_dict['y_tv'], data_dict['y_test'])
-        scores['tuned knn'] = tune_knn(data_dict['X_tv'].cpu(), data_dict['X_test'].cpu(), data_dict['y_tv'].cpu(), data_dict['y_test'].cpu())
+        # scores['tuned knn'] = tune_knn(data_dict['X_tv'].cpu(), data_dict['X_test'].cpu(), data_dict['y_tv'].cpu(), data_dict['y_test'].cpu())
 
         for k,v in scores.items():
             print(f'{k}: {round(100*v[0],3)}% accuracy in {round(v[1],3)}s.')
@@ -254,7 +254,7 @@ if __name__ == '__main__':
         scores_list.append(scores)
 
 
-    scores_list.append("f//2 -> f//4 -> f//8")
+    scores_list.append("nona cos + temp scaling in softmax")
 
     results_path = f'results/{dataset}/scores_{time.strftime("%m%d%H%M")}.pkl'
     results_dir = os.path.dirname(results_path)

@@ -1,19 +1,19 @@
 import torch
 import torch.nn as nn
 from torch.nn import Linear, Dropout, ReLU, Tanh, Sigmoid, BatchNorm1d, LayerNorm
-from torch.nn.functional import softmax, sigmoid, one_hot
+from torch.nn.functional import softmax, sigmoid, one_hot, normalize
 from torchvision.models import resnet50, ResNet50_Weights
 
 class NONA(nn.Module):
     '''
     Nearness of Neighbors Attention Classifier. 
-    A differentiable non-parametric classifier inspired by attention and KNN.
+    A differentiable non-parametric (or single parameter) classifier inspired by attention and KNN.
     To classify a sample, rank the nearness of all other samples 
     and use softmax to obtain probabilities for each class.
     In the notation of attention, Q = Fe(X), K = Fe(X_train) and V = y_train where Fe is an upstream feature extractor. 
     In the notation of KNN, k = |X_train|, metric = euclidean distance or dot product, weights = softmax.
     '''
-    def __init__(self, similarity='euclidean', batch_norm=None):
+    def __init__(self, similarity='euclidean', batch_norm=None, init_temperature=1.0):
         super(NONA, self).__init__()
         self.similarity = similarity
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -21,6 +21,8 @@ class NONA(nn.Module):
 
         if self.batch_norm is not None:
             self.bn = BatchNorm1d(self.batch_norm, dtype=torch.float64, device=self.device)
+
+        self.log_T = nn.Parameter(torch.tensor(init_temperature).log())
    
     def forward(self, x, x_n, y):
         if self.batch_norm is not None:
@@ -34,11 +36,19 @@ class NONA(nn.Module):
         elif self.similarity == 'dot':
             sim = x @ torch.t(x_n)
         
+        elif self.similarity == 'cos':
+            x_norm = normalize(x, p=2, dim=1)
+            x_n_norm = normalize(x_n, p=2, dim=1)
+            sim = x_norm @ torch.t(x_n_norm)
+        
+        T = self.log_T.exp()
+        sim = sim / T
+        
         if torch.equal(x, x_n): # train
             inf_id = torch.diag(torch.full((len(sim),), float('inf'))).to(self.device)
             sim_scores = softmax(sim - inf_id, dim=1)
         
-        else: # eval
+        else: # inference
             sim_scores = softmax(sim, dim=1)
 
         return sim_scores @ y
@@ -57,7 +67,7 @@ class NONA_NN(nn.Module):
         layer_dims = [self.input_size] + self.hl_sizes
         self.fcn = nn.ModuleList(Linear(layer_dims[i], layer_dims[i+1], dtype=torch.float64, device=self.device) for i in range(len(layer_dims)-1))
         
-        self.activation = Tanh() # Tanh allows for neagtive feature covariance between samples
+        self.activation = Tanh() # Tanh allows for negative feature covariance between samples
         self.norms = nn.ModuleList(BatchNorm1d(layer_dims[i+1], dtype=torch.float64, device=self.device) for i in range(len(layer_dims)-1))
         self.input_norm = BatchNorm1d(self.input_size, dtype=torch.float64, device=self.device)
 
@@ -71,7 +81,6 @@ class NONA_NN(nn.Module):
                 self.output = Linear(layer_dims[-1], 1, dtype=torch.float64, device=self.device)
 
     def forward(self, x, x_n, y_n):
-        
         x = self.input_norm(x)
         if self.classifier=='nona':
             x_n = self.input_norm(x_n)
