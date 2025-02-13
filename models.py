@@ -31,12 +31,11 @@ class NONA(nn.Module):
             x_n = self.bn(x_n)
 
         if self.similarity == 'euclidean':
-            # sim = torch.cdist(x,x_n,p=2)
-            # sim = torch.max(sim) - sim
             sim = - torch.cdist(x,x_n,p=2)
         
         elif self.similarity == 'dot':
-            sim = x @ torch.t(x_n)
+            d_k = torch.sqrt(torch.tensor(len(x_n), device=self.device, dtype=torch.float64))
+            sim = x @ torch.t(x_n) / d_k
         
         elif self.similarity == 'cos':
             x_norm = normalize(x, p=2, dim=1)
@@ -112,7 +111,7 @@ class NONA_NN(nn.Module):
                 x_n = norm(self.activation(layer(x_n)))
         
         if self.classifier=='nona':
-            if self.task == 'bin':
+            if self.task == 'binary':
                 return torch.clip(self.output(x, x_n, y_n), 0, 1)
             elif self.task == 'ordinal':
                 return torch.clip(self.output(x, x_n, y_n), 0, self.classes-1)

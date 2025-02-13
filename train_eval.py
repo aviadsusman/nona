@@ -3,7 +3,7 @@ from sklearn import datasets
 from sklearn.preprocessing import OrdinalEncoder, StandardScaler, MinMaxScaler
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.model_selection import GridSearchCV
-from sklearn.metrics import accuracy_score, make_scorer
+from sklearn.metrics import accuracy_score, mean_squared_error, make_scorer
 from sklearn.model_selection import train_test_split
 import torch
 import torch.nn as nn
@@ -20,12 +20,40 @@ import pickle as pkl
 from models import NONA, NONA_NN
 import time
 
+
 def tensor(arr):
     if type(arr) != torch.Tensor:
         arr = torch.Tensor(arr)
     return arr.to(dtype=torch.float64, device=device)
 
-def prep_data(X, y, seed, device):
+def load_data_params(dataset):
+    if dataset == 'bc':
+        task = 'binary'
+        x_y = datasets.load_breast_cancer()
+        X = tensor(x_y.data)
+        y = x_y.target
+        encoder = OrdinalEncoder()
+        y = tensor(encoder.fit_transform(y.reshape(-1, 1)))
+
+    elif dataset == 'cifar':
+        task = 'multiclass'
+        X = torch.load('cifar/feature_extracted/resnet50/X.pt')
+        y = torch.load('cifar/feature_extracted/y.pt')
+    
+    elif dataset == 'sat':
+        task = 'ordinal'
+        X = torch.load('sat/X.pt')
+        y = torch.load('sat/y.pt')
+        
+    classes = len(torch.unique(y))
+    if task == 'multiclass':
+        agg = 'mean'
+    else:
+        agg = None
+
+    return task, X, y, classes, agg
+
+def get_folds(X, y, seed):
     dd = {} # data dict
 
     dd['X_tv'], dd['X_test'], dd['y_tv'], dd['y_test'] = train_test_split(X, y, test_size=0.25, stratify=y, random_state=seed)
@@ -35,7 +63,6 @@ def prep_data(X, y, seed, device):
 
     return dd_tensor
 
-
 def decisions(y):
     y_np = y.cpu().detach()
     if y_np.shape[1] > 1:
@@ -43,12 +70,14 @@ def decisions(y):
     else:
         return np.round(y_np)
 
-
 def mlps_train_eval(X_tv, X_train, X_val, X_test, y_tv, y_train, y_val, y_test):
     scores = {}
+    crit_dict = {'binary': nn.BCELoss(),
+                 'multiclass': nn.CrossEntropyLoss(),
+                 'ordinal': nn.MSELoss()}
 
     learning_rate = 0.001
-    if dataset == 'bc':
+    if dataset in ['bc','sat']:
         batch_size = 32
     elif dataset == 'cifar':
         batch_size = 128
@@ -56,7 +85,7 @@ def mlps_train_eval(X_tv, X_train, X_val, X_test, y_tv, y_train, y_val, y_test):
     train_dataset = torch.utils.data.TensorDataset(X_train, y_train)
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
-    for classifier_head in ['nona euclidean', 'nona dot', 'nona cos', 'dense']:
+    for classifier_head in ['nona euclidean', 'nona dot', 'dense']: # 'nona cos'
         
         print("Training and evaluating", classifier_head) 
         
@@ -78,16 +107,10 @@ def mlps_train_eval(X_tv, X_train, X_val, X_test, y_tv, y_train, y_val, y_test):
             scores[classifier_head] = [accuracy_score(decisions(y_hat_base), y_test.cpu().detach()), end-start]
 
         feats = X_train.shape[1]
-        hls = [feats // 8, feats // 16, feats // 32]
+        hls = [feats // 4, feats // 4, feats // 4]
         model = NONA_NN(input_size=feats, hl_sizes=hls, classifier=classifier, similarity=similarity, task=task, classes=classes, agg=agg)
         
-        if dataset == 'bc':
-            # class_counts = torch.bincount(y_train.to(torch.int))
-            # class_weights = 1.0 / class_counts.float()
-            criterion = nn.BCELoss() # weight=class_weights.to(device)
-        
-        elif dataset == 'cifar':
-            criterion = nn.CrossEntropyLoss()
+        criterion = crit_dict[task]
 
         optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
@@ -218,33 +241,13 @@ if __name__ == '__main__':
     args = parser.parse_args()
     dataset = args.dataset
 
-    if dataset == 'bc':
-        task = 'bin'
-        classes = 2
-    elif dataset == 'cifar':
-        task = 'multiclass'
-        classes = 10
-    
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    task, X, y, classes, agg = load_data_params(dataset)
 
-    if dataset == 'bc':
-        x_y = datasets.load_breast_cancer()
-        X = x_y.data
-        y = x_y.target
-
-        encoder = OrdinalEncoder()
-        y = encoder.fit_transform(y.reshape(-1, 1))
-
-    elif dataset == 'cifar':
-        X = torch.load('cifar/feature_extracted/resnet50/X.pt')
-        y = torch.load('cifar/feature_extracted/y.pt')
-
-        agg = 'mean'
-    
     scores_list = []
     for seed in range(100):
         print(f'Training models for split {seed}.')
-        data_dict = prep_data(X=X, y=y, seed=seed, device=device)
+        data_dict = get_folds(X=X, y=y, seed=seed)
 
         scores = mlps_train_eval(**data_dict)
         # scores['tuned xgb'] = tune_xgb(data_dict['X_tv'], data_dict['X_test'], data_dict['y_tv'], data_dict['y_test'])
@@ -256,7 +259,7 @@ if __name__ == '__main__':
         scores_list.append(scores)
 
 
-    scores_list.append("mean agg no T")
+    scores_list.append("normalize nona dot")
 
     results_path = f'results/{dataset}/scores_{time.strftime("%m%d%H%M")}.pkl'
     results_dir = os.path.dirname(results_path)
