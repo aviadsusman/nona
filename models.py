@@ -13,11 +13,12 @@ class NONA(nn.Module):
     In the notation of attention, Q = Fe(X), K = Fe(X_train) and V = y_train where Fe is an upstream feature extractor. 
     In the notation of KNN, k = |X_train|, metric = euclidean distance or dot product, weights = softmax.
     '''
-    def __init__(self, similarity='euclidean', batch_norm=None, init_temperature=1.0):
+    def __init__(self, similarity='euclidean', batch_norm=None, init_temperature=1.0, agg=None):
         super(NONA, self).__init__()
         self.similarity = similarity
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.batch_norm = batch_norm # Should be num_features of data matrix
+        self.agg = agg
 
         if self.batch_norm is not None:
             self.bn = BatchNorm1d(self.batch_norm, dtype=torch.float64, device=self.device)
@@ -30,8 +31,9 @@ class NONA(nn.Module):
             x_n = self.bn(x_n)
 
         if self.similarity == 'euclidean':
-            sim = torch.cdist(x,x_n,p=2)
-            sim = torch.max(sim) - sim
+            # sim = torch.cdist(x,x_n,p=2)
+            # sim = torch.max(sim) - sim
+            sim = - torch.cdist(x,x_n,p=2)
         
         elif self.similarity == 'dot':
             sim = x @ torch.t(x_n)
@@ -42,19 +44,34 @@ class NONA(nn.Module):
             sim = x_norm @ torch.t(x_n_norm)
         
         T = self.log_T.exp()
-        sim = sim / T
-        
-        if torch.equal(x, x_n): # train
-            inf_id = torch.diag(torch.full((len(sim),), float('inf'))).to(self.device)
-            sim_scores = softmax(sim - inf_id, dim=1)
-        
-        else: # inference
-            sim_scores = softmax(sim, dim=1)
+        # sim = sim / T
 
-        return sim_scores @ y
+        if y.shape[-1] <= 1 or self.agg is None: 
+            if torch.equal(x, x_n): # train
+                inf_id = torch.diag(torch.full((len(sim),), float('inf'))).to(self.device)
+                sim_scores = softmax(sim - inf_id, dim=1)
+            
+            else: # inference
+                sim_scores = softmax(sim, dim=1)
+
+            return sim_scores @ y
+        
+        else: # Aggregate similarities of all samples within each class, then softmax
+            if self.agg == 'mean' and y.max() == 1: #ohe check
+                class_sums = y.sum(dim=0, keepdim=True).clamp(min=1)
+                y = y / class_sums
+            
+            if torch.equal(x, x_n): # train
+                inv_id = (1 - torch.eye(n=len(sim))).to(self.device)
+                sim_scores = (sim * inv_id) @ y
+        
+            else: # inference
+                sim_scores = sim @ y
+            
+            return softmax(sim_scores, dim=1)
 
 class NONA_NN(nn.Module):
-    def __init__(self, task, input_size, hl_sizes, similarity='euclidean', classifier='nona', classes=2):
+    def __init__(self, task, input_size, hl_sizes, similarity='euclidean', classifier='nona', classes=2, agg=None):
         super(NONA_NN, self).__init__()
         self.hl_sizes = hl_sizes
         self.input_size = input_size
@@ -63,6 +80,7 @@ class NONA_NN(nn.Module):
         self.classifier = classifier # for benchmarking
         self.task = task
         self.classes = classes
+        self.agg = agg
 
         layer_dims = [self.input_size] + self.hl_sizes
         self.fcn = nn.ModuleList(Linear(layer_dims[i], layer_dims[i+1], dtype=torch.float64, device=self.device) for i in range(len(layer_dims)-1))
@@ -72,7 +90,7 @@ class NONA_NN(nn.Module):
         self.input_norm = BatchNorm1d(self.input_size, dtype=torch.float64, device=self.device)
 
         if self.classifier=='nona':
-            self.output = NONA(similarity=self.similarity)
+            self.output = NONA(similarity=self.similarity, agg=self.agg)
         
         elif self.classifier=='dense':
             if self.task == 'multiclass':

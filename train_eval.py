@@ -25,19 +25,7 @@ def tensor(arr):
         arr = torch.Tensor(arr)
     return arr.to(dtype=torch.float64, device=device)
 
-def get_data(seed, device):
-    if dataset == 'bc':
-        x_y = datasets.load_breast_cancer()
-        X = x_y.data
-        y = x_y.target
-
-        encoder = OrdinalEncoder()
-        y = encoder.fit_transform(y.reshape(-1, 1))
-    
-    elif dataset == 'cifar':
-        X = torch.load('cifar/feature_extracted/resnet50/X.pt')
-        y = torch.load('cifar/feature_extracted/y.pt')
-
+def prep_data(X, y, seed, device):
     dd = {} # data dict
 
     dd['X_tv'], dd['X_test'], dd['y_tv'], dd['y_test'] = train_test_split(X, y, test_size=0.25, stratify=y, random_state=seed)
@@ -77,7 +65,7 @@ def mlps_train_eval(X_tv, X_train, X_val, X_test, y_tv, y_train, y_val, y_test):
 
         # Classify on raw data/representations
         if classifier == 'nona':
-            base_model = NONA(similarity=similarity, batch_norm=X_tv.shape[1])
+            base_model = NONA(similarity=similarity, batch_norm=X_tv.shape[1], agg=agg)
             
             start = time.time()
             if dataset == 'cifar':
@@ -90,7 +78,8 @@ def mlps_train_eval(X_tv, X_train, X_val, X_test, y_tv, y_train, y_val, y_test):
             scores[classifier_head] = [accuracy_score(decisions(y_hat_base), y_test.cpu().detach()), end-start]
 
         feats = X_train.shape[1]
-        model = NONA_NN(input_size=feats, hl_sizes=[feats // 4, feats // 4, feats // 4], classifier=classifier, similarity=similarity, task=task, classes=classes)
+        hls = [feats // 8, feats // 16, feats // 32]
+        model = NONA_NN(input_size=feats, hl_sizes=hls, classifier=classifier, similarity=similarity, task=task, classes=classes, agg=agg)
         
         if dataset == 'bc':
             # class_counts = torch.bincount(y_train.to(torch.int))
@@ -158,13 +147,12 @@ def tune_xgb(X_train, X_test, y_train, y_test):
 
     xgb = XGBClassifier(eval_metric='mlogloss')
 
-    param_grid = {'n_estimators': [50, 100, 200]}
-    # 'max_depth': [3, 5, 7]
-    #     'learning_rate': [0.01, 0.1, 0.2],
-    #     'subsample': [0.8, 1.0],
-    #     'colsample_bytree': [0.8, 1.0],
-    #     'gamma': [0, 0.1, 1],
-    # }
+    param_grid = {'n_estimators': [50, 100, 200],
+                  'max_depth': [3, 5, 7],
+                  'learning_rate': [0.01, 0.1, 0.2],
+                  'subsample': [0.8, 1.0],
+                  'colsample_bytree': [0.8, 1.0],
+                  'gamma': [0, 0.1, 1]}
 
     grid_search = GridSearchCV(
         estimator=xgb,
@@ -239,10 +227,24 @@ if __name__ == '__main__':
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
+    if dataset == 'bc':
+        x_y = datasets.load_breast_cancer()
+        X = x_y.data
+        y = x_y.target
+
+        encoder = OrdinalEncoder()
+        y = encoder.fit_transform(y.reshape(-1, 1))
+
+    elif dataset == 'cifar':
+        X = torch.load('cifar/feature_extracted/resnet50/X.pt')
+        y = torch.load('cifar/feature_extracted/y.pt')
+
+        agg = 'mean'
+    
     scores_list = []
     for seed in range(100):
         print(f'Training models for split {seed}.')
-        data_dict = get_data(seed=seed, device=device) #dataset=dataset, 
+        data_dict = prep_data(X=X, y=y, seed=seed, device=device)
 
         scores = mlps_train_eval(**data_dict)
         # scores['tuned xgb'] = tune_xgb(data_dict['X_tv'], data_dict['X_test'], data_dict['y_tv'], data_dict['y_test'])
@@ -254,7 +256,7 @@ if __name__ == '__main__':
         scores_list.append(scores)
 
 
-    scores_list.append("nona cos + temp scaling in softmax")
+    scores_list.append("mean agg no T")
 
     results_path = f'results/{dataset}/scores_{time.strftime("%m%d%H%M")}.pkl'
     results_dir = os.path.dirname(results_path)
