@@ -58,13 +58,14 @@ def load_data_params(dataset):
             transforms.Normalize(mean=[0.5], std=[0.5])
             ])
         fe = resnet18(weights='DEFAULT')
-        data_percentage = 0.25
+        data_percentage = 0.125
     return task, data_df, transform, fe, data_percentage
 
 def get_fold_indices(data_df, seed, data_percentage=0.25):
     dd = {} # data dict
     
     ids = data_df['id'].values
+    np.random.seed(42)
     sample_size = int(data_percentage * ids.size)
     ids = np.random.choice(ids, size=sample_size, replace=False)
     
@@ -103,6 +104,7 @@ def mlps_train_eval(train, val, test, feature_extractor):
     
     train_dataset = RSNADataset(train, transform=transform)
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=128, shuffle=True, collate_fn=collate)
+    all_train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=len(train_dataset), shuffle=False, collate_fn=collate) # for val and test
 
     val_dataset = RSNADataset(val, transform=transform)
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=128, shuffle=True, collate_fn=collate)
@@ -148,12 +150,11 @@ def mlps_train_eval(train, val, test, feature_extractor):
             report = f"Epoch {epoch}, Train Loss: {train_loss:.4f}"
 
             # Early stopping
-            if epoch >= start_after_epoch:
+            if epoch > start_after_epoch:
                 model.eval()
                 val_scores = []
-                
                 with torch.no_grad():
-                    for X_val, y_val in tqdm(val_loader, desc="Val", file=sys.stdout):  # Iterate over batches
+                    for (X_train, y_train), (X_val, y_val) in tqdm(zip(all_train_loader, val_loader), desc="Val", file=sys.stdout):  # Iterate over batches
                         y_hat_val = model(X_val, X_train, y_train)  
                         val_scores.append(score(y_hat_val, y_val))  # Store batch scores
 
@@ -174,10 +175,10 @@ def mlps_train_eval(train, val, test, feature_extractor):
         y_hats = []
         y_tests = []
         with torch.no_grad():
-            for X_test, y_test in tqdm(test_loader, desc="Test", file=sys.stdout):  # Iterate over test batches
+            for (X_train, y_train), (X_test, y_test) in tqdm(zip(all_train_loader, test_loader), desc="Test", file=sys.stdout):  # Iterate over test batches
                 y_hat_batch = model(X_test, X_train, y_train)  
                 y_hats.append(y_hat_batch)
-                y_test.append(y_test)
+                y_tests.append(y_test)
 
         y_hat = torch.cat(y_hats, dim=0)
         y_test = torch.cat(y_tests, dim=0)
