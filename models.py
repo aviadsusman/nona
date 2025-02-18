@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 from torch.nn import Linear, Dropout, ReLU, Tanh, Sigmoid, BatchNorm1d, LayerNorm
 from torch.nn.functional import softmax, sigmoid, one_hot, normalize
-from torchvision.models import resnet50, ResNet50_Weights
 
 class NONA(nn.Module):
     '''
@@ -13,18 +12,17 @@ class NONA(nn.Module):
     In the notation of attention, Q = Fe(X), K = Fe(X_train) and V = y_train where Fe is an upstream feature extractor. 
     In the notation of KNN, k = |X_train|, metric = euclidean distance or dot product, weights = softmax.
     '''
-    def __init__(self, similarity='euclidean', batch_norm=None, init_temperature=1.0, agg=None):
+    def __init__(self, similarity='euclidean', batch_norm=None, agg=None, dtype=torch.float64):
         super(NONA, self).__init__()
         self.similarity = similarity
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.batch_norm = batch_norm # Should be num_features of data matrix
         self.agg = agg
+        self.dtype = dtype
 
         if self.batch_norm is not None:
-            self.bn = BatchNorm1d(self.batch_norm, dtype=torch.float64, device=self.device)
-
-        self.log_T = nn.Parameter(torch.tensor(init_temperature).log())
-   
+            self.bn = BatchNorm1d(self.batch_norm, dtype=self.dtype, device=self.device)
+            
     def forward(self, x, x_n, y):
         if self.batch_norm is not None:
             x = self.bn(x)
@@ -34,18 +32,14 @@ class NONA(nn.Module):
             sim = - torch.cdist(x,x_n,p=2)
         
         elif self.similarity == 'dot':
-            d_k = torch.sqrt(torch.tensor(len(x_n), device=self.device, dtype=torch.float64))
-            sim = x @ torch.t(x_n) / d_k
+            sim = x @ torch.t(x_n)
         
         elif self.similarity == 'cos':
             x_norm = normalize(x, p=2, dim=1)
             x_n_norm = normalize(x_n, p=2, dim=1)
             sim = x_norm @ torch.t(x_n_norm)
-        
-        T = self.log_T.exp()
-        # sim = sim / T
 
-        if y.shape[-1] <= 1 or self.agg is None: 
+        if y.shape[-1] <= 1 or self.agg is None:
             if torch.equal(x, x_n): # train
                 inf_id = torch.diag(torch.full((len(sim),), float('inf'))).to(self.device)
                 sim_scores = softmax(sim - inf_id, dim=1)
@@ -70,7 +64,7 @@ class NONA(nn.Module):
             return softmax(sim_scores, dim=1)
 
 class NONA_NN(nn.Module):
-    def __init__(self, task, input_size, hl_sizes, similarity='euclidean', classifier='nona', classes=2, agg=None):
+    def __init__(self, task, input_size, hl_sizes, similarity='euclidean', classifier='nona', classes=2, agg=None, dtype=torch.float64):
         super(NONA_NN, self).__init__()
         self.hl_sizes = hl_sizes
         self.input_size = input_size
@@ -80,22 +74,23 @@ class NONA_NN(nn.Module):
         self.task = task
         self.classes = classes
         self.agg = agg
+        self.dtype = dtype
 
         layer_dims = [self.input_size] + self.hl_sizes
-        self.fcn = nn.ModuleList(Linear(layer_dims[i], layer_dims[i+1], dtype=torch.float64, device=self.device) for i in range(len(layer_dims)-1))
+        self.fcn = nn.ModuleList(Linear(layer_dims[i], layer_dims[i+1], dtype=self.dtype, device=self.device) for i in range(len(layer_dims)-1))
         
         self.activation = Tanh() # Tanh allows for negative feature covariance between samples
-        self.norms = nn.ModuleList(BatchNorm1d(layer_dims[i+1], dtype=torch.float64, device=self.device) for i in range(len(layer_dims)-1))
-        self.input_norm = BatchNorm1d(self.input_size, dtype=torch.float64, device=self.device)
+        self.norms = nn.ModuleList(BatchNorm1d(layer_dims[i+1], dtype=self.dtype, device=self.device) for i in range(len(layer_dims)-1))
+        self.input_norm = BatchNorm1d(self.input_size, dtype=self.dtype, device=self.device)
 
         if self.classifier=='nona':
-            self.output = NONA(similarity=self.similarity, agg=self.agg)
+            self.output = NONA(similarity=self.similarity, agg=self.agg, dtype=self.dtype)
         
         elif self.classifier=='dense':
             if self.task == 'multiclass':
-                self.output = Linear(layer_dims[-1], classes, dtype=torch.float64, device=self.device)
+                self.output = Linear(layer_dims[-1], classes, dtype=self.dtype, device=self.device)
             else:
-                self.output = Linear(layer_dims[-1], 1, dtype=torch.float64, device=self.device)
+                self.output = Linear(layer_dims[-1], 1, dtype=self.dtype, device=self.device)
 
     def forward(self, x, x_n, y_n):
         x = self.input_norm(x)
@@ -111,12 +106,12 @@ class NONA_NN(nn.Module):
                 x_n = norm(self.activation(layer(x_n)))
         
         if self.classifier=='nona':
-            if self.task == 'binary':
+            if self.task in ['binary', 'regression']:
                 return torch.clip(self.output(x, x_n, y_n), 0, 1)
             elif self.task == 'ordinal':
                 return torch.clip(self.output(x, x_n, y_n), 0, self.classes-1)
             elif self.task == 'multiclass':
-                y_n_ohe = one_hot(y_n.long()).to(self.device, torch.float64)
+                y_n_ohe = one_hot(y_n.long()).to(self.device, self.dtype)
                 return torch.clip(self.output(x, x_n, y_n_ohe), 0, 1)
             
         
@@ -126,3 +121,31 @@ class NONA_NN(nn.Module):
                 return (self.classes - 1) * sigmoid(x)
             else:
                 return softmax(x, dim=1)
+
+class NONA_FT(nn.Module):
+    def __init__(self, task, feature_extractor, hl_sizes, similarity='euclidean', classifier='nona', classes=2, agg=None, dtype=torch.float64):
+        super(NONA_FT, self).__init__()
+        self.task = task
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.feature_extractor = feature_extractor.to(self.device)
+        self.hl_sizes = hl_sizes
+        self.similarity = similarity
+        self.classifier = classifier # for benchmarking
+        self.classes = classes
+        self.agg = agg
+        self.dtype = dtype
+
+        for name, module in self.feature_extractor.named_modules():
+            pass
+        self.input_size = getattr(self.feature_extractor, name).out_features
+
+        for param in self.feature_extractor.parameters():
+            param.requires_grad = True
+
+        self.nona_nn = NONA_NN(task=self.task, input_size=self.input_size, hl_sizes=self.hl_sizes, similarity=self.similarity, classifier=self.classifier, classes=self.classes, agg=self.agg, dtype=self.dtype)
+
+    def forward(self, x, x_n, y_n):
+        x = self.feature_extractor(x)
+        x_n = self.feature_extractor(x_n)
+
+        return self.nona_nn(x, x_n, y_n)

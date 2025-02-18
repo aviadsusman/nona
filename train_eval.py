@@ -8,6 +8,7 @@ from sklearn.model_selection import train_test_split
 import torch
 import torch.nn as nn
 from torch.nn.functional import one_hot
+from torcheval.metrics.functional import mean_squared_error
 import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
@@ -19,6 +20,7 @@ import os
 import pickle as pkl
 from models import NONA, NONA_NN
 import time
+import sys
 
 
 def tensor(arr):
@@ -37,13 +39,13 @@ def load_data_params(dataset):
 
     elif dataset == 'cifar':
         task = 'multiclass'
-        X = torch.load('cifar/feature_extracted/resnet50/X.pt')
-        y = torch.load('cifar/feature_extracted/y.pt')
+        X = torch.load('data/cifar/feature_extracted/resnet50/X.pt')
+        y = torch.load('data/cifar/feature_extracted/y.pt')
     
     elif dataset == 'sat':
         task = 'ordinal'
-        X = torch.load('sat/X.pt')
-        y = torch.load('sat/y.pt')
+        X = torch.load('data/sat/X.pt')
+        y = torch.load('data/sat/y.pt')
         
     classes = len(torch.unique(y))
     if task == 'multiclass':
@@ -63,19 +65,28 @@ def get_folds(X, y, seed):
 
     return dd_tensor
 
-def decisions(y):
-    y_np = y.cpu().detach()
-    if y_np.shape[1] > 1:
-        return np.argmax(y_np, axis=1)
-    else:
-        return np.round(y_np)
+
+class Score(nn.Module):
+    def __init__(self, metric):
+        super(Score, self).__init__()
+        self.metric = metric
+
+    def forward(self, y_hat, y):
+        if self.metric == 'accuracy':
+            if y_hat.shape[1] > 1: #multiclass
+                y_hat = torch.argmax(y_hat, dim=1)
+            else:
+                y_hat = torch.round(y_hat)
+            
+            return (y_hat == y).float().mean().item()
+        
+        elif self.metric == 'mse':
+            return - mean_squared_error(y_hat, y).item() # Negative mse to simplify early stopping code
+        
 
 def mlps_train_eval(X_tv, X_train, X_val, X_test, y_tv, y_train, y_val, y_test):
     scores = {}
-    crit_dict = {'binary': nn.BCELoss(),
-                 'multiclass': nn.CrossEntropyLoss(),
-                 'ordinal': nn.MSELoss()}
-
+    
     learning_rate = 0.001
     if dataset in ['bc','sat']:
         batch_size = 32
@@ -104,22 +115,22 @@ def mlps_train_eval(X_tv, X_train, X_val, X_test, y_tv, y_train, y_val, y_test):
                 y_hat_base = base_model(X_test, X_tv, y_tv)
             end = time.time()
 
-            scores[classifier_head] = [accuracy_score(decisions(y_hat_base), y_test.cpu().detach()), end-start]
+            scores[classifier_head] = [score(y_hat_base, y_test), end-start]
 
         feats = X_train.shape[1]
         hls = [feats // 4, feats // 4, feats // 4]
         model = NONA_NN(input_size=feats, hl_sizes=hls, classifier=classifier, similarity=similarity, task=task, classes=classes, agg=agg)
         
-        criterion = crit_dict[task]
+        criterion = crit_dict[task][0]()
 
         optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
         start = time.time()
         patience = 10
-        start_from_epoch = 5
+        start_after_epoch = 5
         count = 0
-        best_acc_val = float('-inf')
-        epoch = 0
+        best_val_score = float('-inf')
+        epoch = 1
         while count < patience:
             model.train()
             train_loss = 0.0
@@ -135,22 +146,21 @@ def mlps_train_eval(X_tv, X_train, X_val, X_test, y_tv, y_train, y_val, y_test):
                 train_loss += loss.item()
 
             train_loss /= len(train_loader)
-            report = f"Epoch {epoch + 1}, Train Loss: {train_loss:.4f}"
+            report = f"Epoch {epoch}, Train Loss: {train_loss:.4f}"
 
             # Early stopping
-            if epoch >= start_from_epoch:
+            if epoch > start_after_epoch:
                 model.eval()
                 with torch.no_grad():
                     y_hat_val = model(X_val, X_train, y_train)
-                    acc_val = accuracy_score(decisions(y_hat_val), y_val.cpu().detach())
-                    if acc_val > best_acc_val:
-                        best_acc_val = acc_val
+                    val_score = score(y_hat_val, y_val)
+                    if val_score > best_val_score:
+                        best_val_score = val_score
                         best_model_state = deepcopy(model.state_dict())
                         count = 0
                     else:
                         count += 1
-
-                report = report + f': Val Acc: {round(float(acc_val), 4)}'
+                report = report + f': Val Score: {round(abs(val_score), 4)}'
             
             print(report)
             epoch += 1
@@ -160,7 +170,7 @@ def mlps_train_eval(X_tv, X_train, X_val, X_test, y_tv, y_train, y_val, y_test):
         end = time.time()
         
 
-        scores[f'{classifier_head} mlp'] =  [accuracy_score(decisions(y_hat), y_test.cpu().detach()), end-start]
+        scores[f'{classifier_head} mlp'] =  [score(y_hat, y_test), end-start]
 
     return scores
 
@@ -243,6 +253,11 @@ if __name__ == '__main__':
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     task, X, y, classes, agg = load_data_params(dataset)
+    crit_dict = {'binary': [nn.BCELoss, 'accuracy'],
+                 'multiclass': [nn.CrossEntropyLoss, 'accuracy'],
+                 'ordinal': [nn.MSELoss, 'accuracy']}
+    
+    score = Score(crit_dict[task][1])
 
     scores_list = []
     for seed in range(100):
@@ -254,12 +269,16 @@ if __name__ == '__main__':
         # scores['tuned knn'] = tune_knn(data_dict['X_tv'].cpu(), data_dict['X_test'].cpu(), data_dict['y_tv'].cpu(), data_dict['y_test'].cpu())
 
         for k,v in scores.items():
-            print(f'{k}: {round(100*v[0],3)}% accuracy in {round(v[1],3)}s.')
+            if score.metric == 'accuracy':
+                test_score = f'{round(100*v[0],3)}%'
+            else:
+                test_score = f'{-round(v[0],3)}'
+            print(f'{k}: {test_score} {score.metric} in {round(v[1],3)}s.')
 
         scores_list.append(scores)
 
 
-    scores_list.append("normalize nona dot")
+    scores_list.append("9,9,9")
 
     results_path = f'results/{dataset}/scores_{time.strftime("%m%d%H%M")}.pkl'
     results_dir = os.path.dirname(results_path)
