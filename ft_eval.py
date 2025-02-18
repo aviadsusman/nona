@@ -126,10 +126,10 @@ def mlps_train_eval(train, val, test, feature_extractor):
 
         start = time.time()
         patience = 10
-        start_from_epoch = 5
+        start_after_epoch = 5
         count = 0
         best_val_score = float('-inf')
-        epoch = 0
+        epoch = 1
         while count < patience:
             model.train()
             train_loss = 0.0
@@ -145,10 +145,10 @@ def mlps_train_eval(train, val, test, feature_extractor):
                 train_loss += loss.item()
 
             train_loss /= len(train_loader)
-            report = f"Epoch {epoch + 1}, Train Loss: {train_loss:.4f}"
+            report = f"Epoch {epoch}, Train Loss: {train_loss:.4f}"
 
             # Early stopping
-            if epoch >= start_from_epoch:
+            if epoch >= start_after_epoch:
                 model.eval()
                 val_scores = []
                 
