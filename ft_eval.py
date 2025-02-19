@@ -104,13 +104,13 @@ def mlps_train_eval(train, val, test, feature_extractor):
     
     train_dataset = RSNADataset(train, transform=transform)
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=128, shuffle=True, collate_fn=collate)
-    all_train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=len(train_dataset), shuffle=False, collate_fn=collate) # for val and test
+    all_train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=len(train_dataset), shuffle=False, collate_fn=collate) # for use as neighbors with val and test
 
     val_dataset = RSNADataset(val, transform=transform)
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=128, shuffle=True, collate_fn=collate)
 
     test_dataset = RSNADataset(test, transform=transform)
-    test_loader = torch.utils.data.DataLoader(val_dataset, batch_size=128, shuffle=True, collate_fn=collate)
+    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=128, shuffle=True, collate_fn=collate)
 
     for classifier_head in ['nona euclidean', 'nona dot', 'dense']:
         
@@ -154,11 +154,11 @@ def mlps_train_eval(train, val, test, feature_extractor):
                 model.eval()
                 val_scores = []
                 with torch.no_grad():
-                    for (X_train, y_train), (X_val, y_val) in tqdm(zip(all_train_loader, val_loader), desc="Val", file=sys.stdout):  # Iterate over batches
+                    for (X_train, y_train), (X_val, y_val) in tqdm(zip(all_train_loader, val_loader), desc="Val", file=sys.stdout):
                         y_hat_val = model(X_val, X_train, y_train)  
-                        val_scores.append(score(y_hat_val, y_val))  # Store batch scores
+                        val_scores.append(score(y_hat_val, y_val))
 
-                val_score = sum(val_scores) / len(val_scores)  # Compute overall validation score
+                val_score = sum(val_scores) / len(val_scores)
 
                 if val_score > best_val_score:
                     best_val_score = val_score
@@ -175,7 +175,7 @@ def mlps_train_eval(train, val, test, feature_extractor):
         y_hats = []
         y_tests = []
         with torch.no_grad():
-            for (X_train, y_train), (X_test, y_test) in tqdm(zip(all_train_loader, test_loader), desc="Test", file=sys.stdout):  # Iterate over test batches
+            for (X_train, y_train), (X_test, y_test) in tqdm(zip(all_train_loader, test_loader), desc="Test", file=sys.stdout):
                 y_hat_batch = model(X_test, X_train, y_train)  
                 y_hats.append(y_hat_batch)
                 y_tests.append(y_test)
