@@ -96,15 +96,15 @@ def mlps_train_eval(X_tv, X_train, X_val, X_test, y_tv, y_train, y_val, y_test):
     train_dataset = torch.utils.data.TensorDataset(X_train, y_train)
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
-    for classifier_head in ['nona euclidean', 'nona dot', 'dense']: # 'nona cos'
+    for predictor_head in ['nona euclidean', 'nona dot', 'dense']: # 'nona cos'
         
-        print("Training and evaluating", classifier_head) 
+        print("Training and evaluating", predictor_head) 
         
-        classifier = classifier_head.split(" ")[0]
-        similarity = classifier_head.split(" ")[-1]
+        predictor = predictor_head.split(" ")[0]
+        similarity = predictor_head.split(" ")[-1]
 
         # Classify on raw data/representations
-        if classifier == 'nona':
+        if predictor == 'nona':
             base_model = NONA(similarity=similarity, batch_norm=X_tv.shape[1], agg=agg)
             
             start = time.time()
@@ -115,11 +115,11 @@ def mlps_train_eval(X_tv, X_train, X_val, X_test, y_tv, y_train, y_val, y_test):
                 y_hat_base = base_model(X_test, X_tv, y_tv)
             end = time.time()
 
-            scores[classifier_head] = [score(y_hat_base, y_test), end-start]
+            scores[predictor_head] = [score(y_hat_base, y_test), end-start]
 
         feats = X_train.shape[1]
         hls = [feats // 4, feats // 4, feats // 4]
-        model = NONA_NN(input_size=feats, hl_sizes=hls, classifier=classifier, similarity=similarity, task=task, classes=classes, agg=agg)
+        model = NONA_NN(input_size=feats, hl_sizes=hls, predictor=predictor, similarity=similarity, task=task, classes=classes, agg=agg)
         
         criterion = crit_dict[task][0]()
 
@@ -170,7 +170,7 @@ def mlps_train_eval(X_tv, X_train, X_val, X_test, y_tv, y_train, y_val, y_test):
         end = time.time()
         
 
-        scores[f'{classifier_head} mlp'] =  [score(y_hat, y_test), end-start]
+        scores[f'{predictor_head} mlp'] =  [score(y_hat, y_test), end-start]
 
     return scores
 

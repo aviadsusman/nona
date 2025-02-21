@@ -112,15 +112,15 @@ def mlps_train_eval(train, val, test, feature_extractor):
     test_dataset = RSNADataset(test, transform=transform)
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=len(test_dataset), shuffle=True, collate_fn=collate)
 
-    for classifier_head in ['nona euclidean', 'nona dot', 'dense']:
+    for predictor_head in ['nona euclidean', 'nona dot', 'dense']:
         
-        print("Training", classifier_head) 
+        print("Training", predictor_head) 
         
-        classifier = classifier_head.split(" ")[0]
-        similarity = classifier_head.split(" ")[-1]
+        predictor = predictor_head.split(" ")[0]
+        similarity = predictor_head.split(" ")[-1]
 
         hls = [200, 50, 2]
-        model = NONA_FT(feature_extractor=feature_extractor, hl_sizes=hls, classifier=classifier, similarity=similarity, task=task, dtype=torch.float32, mlp=False)
+        model = NONA_FT(feature_extractor=feature_extractor, hl_sizes=hls, predictor=predictor, similarity=similarity, task=task, dtype=torch.float32, mlp=False)
         
         criterion = crit_dict[task][0]()
 
@@ -171,7 +171,7 @@ def mlps_train_eval(train, val, test, feature_extractor):
             print(report)
             epoch += 1
         
-        print("Evaluating", classifier_head) 
+        print("Evaluating", predictor_head) 
         y_hats = []
         y_tests = []
         model.load_state_dict(best_model_state)
@@ -186,9 +186,9 @@ def mlps_train_eval(train, val, test, feature_extractor):
         end = time.time()
         
 
-        scores[f'{classifier_head} mlp'] =  [score(y_hat, y_test), end-start]
+        scores[f'{predictor_head} mlp'] =  [score(y_hat, y_test), end-start]
         if save_models:
-            model_path = f'results/{dataset}/models/{classifier_head}_{script_start_time}.pth'
+            model_path = f'results/{dataset}/models/{predictor_head}_{script_start_time}.pth'
             model_dir = os.path.dirname(model_path)
             if not os.path.exists(model_dir):
                 os.makedirs(model_dir)

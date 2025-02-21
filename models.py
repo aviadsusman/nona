@@ -5,8 +5,8 @@ from torch.nn.functional import softmax, sigmoid, one_hot, normalize
 
 class NONA(nn.Module):
     '''
-    Nearness of Neighbors Attention Classifier. 
-    A differentiable non-parametric (or single parameter) classifier inspired by attention and KNN.
+    Nearness of Neighbors Attention Predictor. 
+    A differentiable non-parametric (or single parameter) predictor inspired by attention and KNN.
     To classify a sample, rank the nearness of all other samples 
     and use softmax to obtain probabilities for each class.
     In the notation of attention, Q = Fe(X), K = Fe(X_train) and V = y_train where Fe is an upstream feature extractor. 
@@ -64,13 +64,13 @@ class NONA(nn.Module):
             return softmax(sim_scores, dim=1)
 
 class NONA_NN(nn.Module):
-    def __init__(self, task, input_size, hl_sizes, similarity='euclidean', classifier='nona', classes=2, agg=None, dtype=torch.float64, mlp=True):
+    def __init__(self, task, input_size, hl_sizes, similarity='euclidean', predictor='nona', classes=2, agg=None, dtype=torch.float64, mlp=True):
         super(NONA_NN, self).__init__()
         self.hl_sizes = hl_sizes
         self.input_size = input_size
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.similarity = similarity
-        self.classifier = classifier # for benchmarking
+        self.predictor = predictor # for benchmarking
         self.task = task
         self.classes = classes
         self.agg = agg
@@ -86,10 +86,10 @@ class NONA_NN(nn.Module):
         
         self.input_norm = BatchNorm1d(self.input_size, dtype=self.dtype, device=self.device)
 
-        if self.classifier=='nona':
+        if self.predictor=='nona':
             self.output = NONA(similarity=self.similarity, agg=self.agg, dtype=self.dtype)
         
-        elif self.classifier=='dense':
+        elif self.predictor=='dense':
             if self.task == 'multiclass':
                 self.output = Linear(layer_dims[-1], classes, dtype=self.dtype, device=self.device)
             else:
@@ -100,17 +100,17 @@ class NONA_NN(nn.Module):
 
     def forward(self, x, x_n, y_n, get_embeddings=False):
         x = self.input_norm(x)
-        if self.classifier=='nona':
+        if self.predictor=='nona':
             x_n = self.input_norm(x_n)
 
         if self.mlp:
             for layer, norm in zip(self.fcn, self.norms):
                 x = norm(self.activation(layer(x)))
 
-                if self.classifier=='nona':    
+                if self.predictor=='nona':    
                     x_n = norm(self.activation(layer(x_n)))
             
-        if self.classifier=='nona':
+        if self.predictor=='nona':
             if self.task in ['binary', 'regression']:
                 if get_embeddings:
                     return [torch.clip(self.output(x, x_n, y_n), 0, 1), x]
@@ -123,7 +123,7 @@ class NONA_NN(nn.Module):
                 return torch.clip(self.output(x, x_n, y_n_ohe), 0, 1)
             
         
-        elif self.classifier=='dense':
+        elif self.predictor=='dense':
             x = self.output(x)
             if self.task != 'multiclass':
                 return ((self.classes - 1) * sigmoid(x)).squeeze()
@@ -131,14 +131,14 @@ class NONA_NN(nn.Module):
                 return softmax(x, dim=1)
 
 class NONA_FT(nn.Module):
-    def __init__(self, task, feature_extractor, hl_sizes, similarity='euclidean', classifier='nona', classes=2, agg=None, dtype=torch.float64, mlp=True):
+    def __init__(self, task, feature_extractor, hl_sizes, similarity='euclidean', predictor='nona', classes=2, agg=None, dtype=torch.float64, mlp=True):
         super(NONA_FT, self).__init__()
         self.task = task
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.feature_extractor = feature_extractor.to(self.device)
         self.hl_sizes = hl_sizes
         self.similarity = similarity
-        self.classifier = classifier # for benchmarking
+        self.predictor = predictor # for benchmarking
         self.classes = classes
         self.agg = agg
         self.dtype = dtype
@@ -156,7 +156,7 @@ class NONA_FT(nn.Module):
             input_size=self.input_size, 
             hl_sizes=self.hl_sizes, 
             similarity=self.similarity, 
-            classifier=self.classifier, 
+            predictor=self.predictor, 
             classes=self.classes, 
             agg=self.agg, 
             dtype=self.dtype, 
