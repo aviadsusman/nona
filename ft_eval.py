@@ -107,10 +107,10 @@ def mlps_train_eval(train, val, test, feature_extractor):
     all_train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=len(train_dataset), shuffle=False, collate_fn=collate) # for use as neighbors with val and test
 
     val_dataset = RSNADataset(val, transform=transform)
-    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=128, shuffle=True, collate_fn=collate)
+    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=len(val_dataset), shuffle=True, collate_fn=collate)
 
     test_dataset = RSNADataset(test, transform=transform)
-    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=128, shuffle=True, collate_fn=collate)
+    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=len(test_dataset), shuffle=True, collate_fn=collate)
 
     for classifier_head in ['nona euclidean', 'nona dot', 'dense']:
         
@@ -119,8 +119,8 @@ def mlps_train_eval(train, val, test, feature_extractor):
         classifier = classifier_head.split(" ")[0]
         similarity = classifier_head.split(" ")[-1]
 
-        hls = [200, 50]
-        model = NONA_FT(feature_extractor=feature_extractor, hl_sizes=hls, classifier=classifier, similarity=similarity, task=task, dtype=torch.float32)
+        hls = [200, 50, 2]
+        model = NONA_FT(feature_extractor=feature_extractor, hl_sizes=hls, classifier=classifier, similarity=similarity, task=task, dtype=torch.float32, mlp=False)
         
         criterion = crit_dict[task][0]()
 
@@ -174,6 +174,7 @@ def mlps_train_eval(train, val, test, feature_extractor):
         print("Evaluating", classifier_head) 
         y_hats = []
         y_tests = []
+        model.load_state_dict(best_state_dict)
         with torch.no_grad():
             for (X_train, y_train), (X_test, y_test) in tqdm(zip(all_train_loader, test_loader), desc="Test", file=sys.stdout):
                 y_hat_batch = model(X_test, X_train, y_train)  
@@ -186,15 +187,28 @@ def mlps_train_eval(train, val, test, feature_extractor):
         
 
         scores[f'{classifier_head} mlp'] =  [score(y_hat, y_test), end-start]
+        if save_models:
+            model_path = f'results/{dataset}/models/{classifier_head}_{script_start_time}.pth'
+            model_dir = os.path.dirname(model_path)
+            if not os.path.exists(model_dir):
+                os.makedirs(model_dir)
+            torch.save(model.state_dict(), model_path)
 
     return scores
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Dataset and other configs.")
     parser.add_argument('--dataset', type=str, default='Which dataset to load in.', help='Path to data directory.')
-    
+    parser.add_argument('--seeds', type=int, default=10, help='How many splits of the data to train and test on.')
+    parser.add_argument('--savemodels', action='store_true', default=False, help='Whether or not to save final models')
     args = parser.parse_args()
     dataset = args.dataset
+    save_models = args.savemodels
+    seeds = args.seeds
+    if save_models:
+        seeds = 1
+
+    script_start_time = time.strftime("%m%d%H%M")
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
@@ -207,7 +221,7 @@ if __name__ == '__main__':
     score = Score(crit_dict[task][1])
 
     scores_list = []
-    for seed in range(10):
+    for seed in range(seeds):
         print(f'Training and evaluating models for split {seed}.')
         
         idx_dict = get_fold_indices(data_df, seed=seed, data_percentage=data_percentage)
@@ -224,9 +238,9 @@ if __name__ == '__main__':
         scores_list.append(scores)
 
 
-    scores_list.append("9,9,9")
+    scores_list.append("200,50,2 to test for visualization")
 
-    results_path = f'results/{dataset}/scores_{time.strftime("%m%d%H%M")}.pkl'
+    results_path = f'results/{dataset}/scores_{script_start_time}.pkl'
     results_dir = os.path.dirname(results_path)
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)

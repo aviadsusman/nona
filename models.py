@@ -64,7 +64,7 @@ class NONA(nn.Module):
             return softmax(sim_scores, dim=1)
 
 class NONA_NN(nn.Module):
-    def __init__(self, task, input_size, hl_sizes, similarity='euclidean', classifier='nona', classes=2, agg=None, dtype=torch.float64):
+    def __init__(self, task, input_size, hl_sizes, similarity='euclidean', classifier='nona', classes=2, agg=None, dtype=torch.float64, mlp=True):
         super(NONA_NN, self).__init__()
         self.hl_sizes = hl_sizes
         self.input_size = input_size
@@ -75,12 +75,15 @@ class NONA_NN(nn.Module):
         self.classes = classes
         self.agg = agg
         self.dtype = dtype
+        self.mlp = mlp
 
         layer_dims = [self.input_size] + self.hl_sizes
-        self.fcn = nn.ModuleList(Linear(layer_dims[i], layer_dims[i+1], dtype=self.dtype, device=self.device) for i in range(len(layer_dims)-1))
+        if self.mlp:
+            self.fcn = nn.ModuleList(Linear(layer_dims[i], layer_dims[i+1], dtype=self.dtype, device=self.device) for i in range(len(layer_dims)-1))
         
-        self.activation = Tanh() # Tanh allows for negative feature covariance between samples
-        self.norms = nn.ModuleList(BatchNorm1d(layer_dims[i+1], dtype=self.dtype, device=self.device) for i in range(len(layer_dims)-1))
+            self.activation = Tanh() # Tanh allows for negative feature covariance between samples
+            self.norms = nn.ModuleList(BatchNorm1d(layer_dims[i+1], dtype=self.dtype, device=self.device) for i in range(len(layer_dims)-1))
+        
         self.input_norm = BatchNorm1d(self.input_size, dtype=self.dtype, device=self.device)
 
         if self.classifier=='nona':
@@ -90,24 +93,29 @@ class NONA_NN(nn.Module):
             if self.task == 'multiclass':
                 self.output = Linear(layer_dims[-1], classes, dtype=self.dtype, device=self.device)
             else:
-                self.output = Linear(layer_dims[-1], 1, dtype=self.dtype, device=self.device)
+                if self.mlp:
+                    self.output = Linear(layer_dims[-1], 1, dtype=self.dtype, device=self.device)
+                else:
+                    self.output = Linear(self.input_size, 1, dtype=self.dtype, device=self.device)
 
-    def forward(self, x, x_n, y_n):
+    def forward(self, x, x_n, y_n, get_embeddings=False):
         x = self.input_norm(x)
         if self.classifier=='nona':
             x_n = self.input_norm(x_n)
 
-        for layer, norm in zip(self.fcn, self.norms):
-            x = norm(self.activation(layer(x)))
+        if self.mlp:
+            for layer, norm in zip(self.fcn, self.norms):
+                x = norm(self.activation(layer(x)))
 
-            if self.classifier=='nona':    
-                # try normalizing with the learned test params and
-                # try with unlearned params
-                x_n = norm(self.activation(layer(x_n)))
-        
+                if self.classifier=='nona':    
+                    x_n = norm(self.activation(layer(x_n)))
+            
         if self.classifier=='nona':
             if self.task in ['binary', 'regression']:
-                return torch.clip(self.output(x, x_n, y_n), 0, 1)
+                if get_embeddings:
+                    return [torch.clip(self.output(x, x_n, y_n), 0, 1), x]
+                else:
+                    return torch.clip(self.output(x, x_n, y_n), 0, 1)
             elif self.task == 'ordinal':
                 return torch.clip(self.output(x, x_n, y_n), 0, self.classes-1)
             elif self.task == 'multiclass':
@@ -123,7 +131,7 @@ class NONA_NN(nn.Module):
                 return softmax(x, dim=1)
 
 class NONA_FT(nn.Module):
-    def __init__(self, task, feature_extractor, hl_sizes, similarity='euclidean', classifier='nona', classes=2, agg=None, dtype=torch.float64):
+    def __init__(self, task, feature_extractor, hl_sizes, similarity='euclidean', classifier='nona', classes=2, agg=None, dtype=torch.float64, mlp=True):
         super(NONA_FT, self).__init__()
         self.task = task
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -134,6 +142,7 @@ class NONA_FT(nn.Module):
         self.classes = classes
         self.agg = agg
         self.dtype = dtype
+        self.mlp = mlp
 
         for name, module in self.feature_extractor.named_modules():
             pass
@@ -142,10 +151,19 @@ class NONA_FT(nn.Module):
         for param in self.feature_extractor.parameters():
             param.requires_grad = True
 
-        self.nona_nn = NONA_NN(task=self.task, input_size=self.input_size, hl_sizes=self.hl_sizes, similarity=self.similarity, classifier=self.classifier, classes=self.classes, agg=self.agg, dtype=self.dtype)
+        self.nona_nn = NONA_NN(
+            task=self.task, 
+            input_size=self.input_size, 
+            hl_sizes=self.hl_sizes, 
+            similarity=self.similarity, 
+            classifier=self.classifier, 
+            classes=self.classes, 
+            agg=self.agg, 
+            dtype=self.dtype, 
+            mlp=self.mlp)
 
-    def forward(self, x, x_n, y_n):
+    def forward(self, x, x_n, y_n, get_embeddings=False):
         x = self.feature_extractor(x)
         x_n = self.feature_extractor(x_n)
 
-        return self.nona_nn(x, x_n, y_n)
+        return self.nona_nn(x, x_n, y_n, get_embeddings)
