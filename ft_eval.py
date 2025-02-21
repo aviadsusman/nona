@@ -174,7 +174,7 @@ def mlps_train_eval(train, val, test, feature_extractor):
         print("Evaluating", classifier_head) 
         y_hats = []
         y_tests = []
-        model.load_state_dict(best_state_dict)
+        model.load_state_dict(best_model_state)
         with torch.no_grad():
             for (X_train, y_train), (X_test, y_test) in tqdm(zip(all_train_loader, test_loader), desc="Test", file=sys.stdout):
                 y_hat_batch = model(X_test, X_train, y_train)  
