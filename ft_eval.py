@@ -154,7 +154,7 @@ def mlps_train_eval(train, val, test, feature_extractor):
                 train_loss += loss.item()
 
             train_loss /= len(train_loader)
-            report = f"Train Loss: {train_loss:.4f}"
+            report = f"Train Loss: {train_loss: .5f}"
 
             # Early stopping
             if epoch > start_after_epoch:
@@ -173,7 +173,7 @@ def mlps_train_eval(train, val, test, feature_extractor):
                     count = 0
                 else:
                     count += 1
-                report = report + f': Val Score: {round(abs(val_score), 4)}'
+                report = report + f': Val Score: {abs(val_score): .5f}'
             
             print(report)
             epoch += 1
