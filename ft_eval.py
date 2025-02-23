@@ -57,7 +57,7 @@ def load_data_params(dataset):
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5], std=[0.5])
             ])
-        fe = resnet18(weights='DEFAULT')
+        fe = resnet18
         data_percentage = 0.125
     return task, data_df, transform, fe, data_percentage
 
@@ -65,7 +65,6 @@ def get_fold_indices(data_df, seed, data_percentage=0.25):
     dd = {} # data dict
     
     ids = data_df['id'].values
-    np.random.seed(42)
     sample_size = int(data_percentage * ids.size)
     ids = np.random.choice(ids, size=sample_size, replace=False)
     
@@ -103,14 +102,14 @@ def mlps_train_eval(train, val, test, feature_extractor):
     learning_rate = 1e-5
     
     train_dataset = RSNADataset(train, transform=transform)
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=128, shuffle=True, collate_fn=collate)
-    all_train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=len(train_dataset), shuffle=False, collate_fn=collate) # for use as neighbors with val and test
+    train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True, collate_fn=collate)
+    all_train_loader = DataLoader(train_dataset, batch_size=len(train_dataset), shuffle=False, collate_fn=collate) # for use as neighbors with val and test
 
     val_dataset = RSNADataset(val, transform=transform)
-    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=len(val_dataset), shuffle=True, collate_fn=collate)
+    val_loader = DataLoader(val_dataset, batch_size=len(val_dataset), shuffle=True, collate_fn=collate)
 
     test_dataset = RSNADataset(test, transform=transform)
-    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=len(test_dataset), shuffle=True, collate_fn=collate)
+    test_loader = DataLoader(test_dataset, batch_size=len(test_dataset), shuffle=True, collate_fn=collate)
 
     for predictor_head in ['nona euclidean', 'nona dot', 'dense']:
         
@@ -119,8 +118,16 @@ def mlps_train_eval(train, val, test, feature_extractor):
         predictor = predictor_head.split(" ")[0]
         similarity = predictor_head.split(" ")[-1]
 
-        hls = [200, 50, 2]
-        model = NONA_FT(feature_extractor=feature_extractor, hl_sizes=hls, predictor=predictor, similarity=similarity, task=task, dtype=torch.float32, mlp=False)
+        if dataset == 'rsna': # reinitialize weights
+            feature_extractor_weights = feature_extractor(weights='DEFAULT')
+
+        hls = [200, 50]
+        model = NONA_FT(feature_extractor=feature_extractor_weights, 
+                        hl_sizes=hls, 
+                        predictor=predictor, 
+                        similarity=similarity, 
+                        task=task, 
+                        dtype=torch.float32)
         
         criterion = crit_dict[task][0]()
 
@@ -147,7 +154,7 @@ def mlps_train_eval(train, val, test, feature_extractor):
                 train_loss += loss.item()
 
             train_loss /= len(train_loader)
-            report = f"Epoch {epoch}, Train Loss: {train_loss:.4f}"
+            report = f"Train Loss: {train_loss:.4f}"
 
             # Early stopping
             if epoch > start_after_epoch:
@@ -188,7 +195,7 @@ def mlps_train_eval(train, val, test, feature_extractor):
 
         scores[f'{predictor_head} mlp'] =  [score(y_hat, y_test), end-start]
         if save_models:
-            model_path = f'results/{dataset}/models/{predictor_head}_{script_start_time}.pth'
+            model_path = f'results/{dataset}/models/{script_start_time}/{predictor_head}_{seed}.pth'
             model_dir = os.path.dirname(model_path)
             if not os.path.exists(model_dir):
                 os.makedirs(model_dir)
@@ -205,8 +212,6 @@ if __name__ == '__main__':
     dataset = args.dataset
     save_models = args.savemodels
     seeds = args.seeds
-    if save_models:
-        seeds = 1
 
     script_start_time = time.strftime("%m%d%H%M")
 
@@ -220,9 +225,15 @@ if __name__ == '__main__':
                  'regression': [nn.MSELoss, 'mse']}
     score = Score(crit_dict[task][1])
 
-    scores_list = []
+    results_path = f'results/{dataset}/scores_{script_start_time}.pkl'
+    results_dir = os.path.dirname(results_path)
+    if not os.path.exists(results_dir):
+        os.makedirs(results_dir)
+    
+    scores_list = ["200,50 for visualization"]
+
     for seed in range(seeds):
-        print(f'Training and evaluating models for split {seed}.')
+        print(f'Training and evaluating models for split {seed+1}.')
         
         idx_dict = get_fold_indices(data_df, seed=seed, data_percentage=data_percentage)
 
@@ -236,14 +247,6 @@ if __name__ == '__main__':
             print(f'{k}: {test_score} {score.metric} in {round(v[1],3)}s.')
 
         scores_list.append(scores)
-
-
-    scores_list.append("200,50,2 to test for visualization")
-
-    results_path = f'results/{dataset}/scores_{script_start_time}.pkl'
-    results_dir = os.path.dirname(results_path)
-    if not os.path.exists(results_dir):
-        os.makedirs(results_dir)
-    
-    with open(results_path, "wb") as file:
-        pkl.dump(obj=scores_list, file=file)
+        
+        with open(results_path, "wb") as file:
+            pkl.dump(obj=scores_list, file=file)

@@ -124,9 +124,12 @@ class NONA_NN(nn.Module):
             
         
         elif self.predictor=='dense':
-            x = self.output(x)
+            # x = self.output(x)
             if self.task != 'multiclass':
-                return ((self.classes - 1) * sigmoid(x)).squeeze()
+                if get_embeddings:
+                    return [((self.classes - 1) * sigmoid(self.output(x))).squeeze(), x]
+                else:
+                    return ((self.classes - 1) * sigmoid(x)).squeeze()
             else:
                 return softmax(x, dim=1)
 

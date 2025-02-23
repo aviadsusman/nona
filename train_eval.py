@@ -119,7 +119,13 @@ def mlps_train_eval(X_tv, X_train, X_val, X_test, y_tv, y_train, y_val, y_test):
 
         feats = X_train.shape[1]
         hls = [feats // 4, feats // 4, feats // 4]
-        model = NONA_NN(input_size=feats, hl_sizes=hls, predictor=predictor, similarity=similarity, task=task, classes=classes, agg=agg)
+        model = NONA_NN(input_size=feats, 
+                        hl_sizes=hls, 
+                        predictor=predictor, 
+                        similarity=similarity, 
+                        task=task, 
+                        classes=classes, 
+                        agg=agg)
         
         criterion = crit_dict[task][0]()
 
