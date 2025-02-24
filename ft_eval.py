@@ -62,14 +62,15 @@ def load_data_params(dataset):
     return task, data_df, transform, fe, data_percentage
 
 def get_fold_indices(data_df, seed, data_percentage=0.25):
-    dd = {} # data dict
+    id_dict = {} # data dict
     
     ids = data_df['id'].values
-    sample_size = int(data_percentage * ids.size)
-    ids = np.random.choice(ids, size=sample_size, replace=False)
+    binned_labels = data_df['boneage binned'].values
+
+    _, all_ids, _, all_binned_labels = train_test_split(ids, binned_labels, test_size=data_percentage, stratify=binned_labels, random_state=seed)
     
-    train_val, dd['test'] = train_test_split(ids, test_size=0.25, random_state=seed)
-    dd['train'], dd['val'] = train_test_split(train_val, test_size=0.15, random_state=seed)
+    train_val_ids, id_dict['test'], train_val_binned_labels, _ = train_test_split(all_ids, all_binned_labels, stratify=all_binned_labels, test_size=0.25, random_state=seed)
+    id_dict['train'], id_dict['val'] = train_test_split(train_val_ids, stratify=train_val_binned_labels, test_size=0.15, random_state=seed)
 
     return dd
 
@@ -192,8 +193,8 @@ def mlps_train_eval(train, val, test, feature_extractor):
         y_test = torch.cat(y_tests, dim=0)
         end = time.time()
         
-
         scores[f'{predictor_head} mlp'] =  [score(y_hat, y_test), end-start]
+        
         if save_models:
             model_path = f'results/{dataset}/models/{script_start_time}/{predictor_head}_{seed}.pth'
             model_dir = os.path.dirname(model_path)
