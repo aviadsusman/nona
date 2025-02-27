@@ -9,7 +9,8 @@ class NONA(nn.Module):
     A differentiable non-parametric (or single parameter) predictor inspired by attention and KNN.
     To classify a sample, rank the nearness of all other samples 
     and use softmax to obtain probabilities for each class.
-    In the notation of attention, Q = Fe(X), K = Fe(X_train) and V = y_train where Fe is an upstream feature extractor. 
+    In the notation of attention, Q = Fe(X), K = Fe(X_n) and V = y_n where Fe is an upstream feature extractor
+    and X\ 
     In the notation of KNN, k = |X_train|, metric = euclidean distance or dot product, weights = softmax.
     '''
     def __init__(self, similarity='euclidean', batch_norm=None, agg=None, dtype=torch.float64):
@@ -39,7 +40,7 @@ class NONA(nn.Module):
             x_n_norm = normalize(x_n, p=2, dim=1)
             sim = x_norm @ torch.t(x_n_norm)
 
-        if y.shape[-1] <= 1 or self.agg is None:
+        if y.shape[-1] <= 1 or self.agg is None: # Not  multiclass with aggregated similarities
             if torch.equal(x, x_n): # train
                 inf_id = torch.diag(torch.full((len(sim),), float('inf'))).to(self.device)
                 sim_scores = softmax(sim - inf_id, dim=1)
@@ -64,7 +65,7 @@ class NONA(nn.Module):
             return softmax(sim_scores, dim=1)
 
 class NONA_NN(nn.Module):
-    def __init__(self, task, input_size, hl_sizes, similarity='euclidean', predictor='nona', classes=2, agg=None, dtype=torch.float64, mlp=True):
+    def __init__(self, task, input_size, hl_sizes=list(), similarity='euclidean', predictor='nona', classes=2, agg=None, dtype=torch.float64, skip_final_bn=False):
         super(NONA_NN, self).__init__()
         self.hl_sizes = hl_sizes
         self.input_size = input_size
@@ -76,13 +77,19 @@ class NONA_NN(nn.Module):
         self.agg = agg
         self.dtype = dtype
         self.mlp = mlp
+        self.skip_final_bn = skip_final_bn # temp attribute to test effect of final bn on embeddings/performance
 
         layer_dims = [self.input_size] + self.hl_sizes
-        if self.mlp:
+
+        if hl_sizes != list():
             self.fcn = nn.ModuleList(Linear(layer_dims[i], layer_dims[i+1], dtype=self.dtype, device=self.device) for i in range(len(layer_dims)-1))
         
             self.activation = Tanh() # Tanh allows for negative feature covariance between samples
+            
             self.norms = nn.ModuleList(BatchNorm1d(layer_dims[i+1], dtype=self.dtype, device=self.device) for i in range(len(layer_dims)-1))
+            
+            if self.skip_final_bn: 
+                self.norms[-1] = nn.Identity(layer_dims[-1], dtype=self.dtype, device=self.device)
         
         self.input_norm = BatchNorm1d(self.input_size, dtype=self.dtype, device=self.device)
 
@@ -91,19 +98,16 @@ class NONA_NN(nn.Module):
         
         elif self.predictor=='dense':
             if self.task == 'multiclass':
-                self.output = Linear(layer_dims[-1], classes, dtype=self.dtype, device=self.device)
+                self.output_layer = Linear(layer_dims[-1], self.classes, dtype=self.dtype, device=self.device)
             else:
-                if self.mlp:
-                    self.output = Linear(layer_dims[-1], 1, dtype=self.dtype, device=self.device)
-                else:
-                    self.output = Linear(self.input_size, 1, dtype=self.dtype, device=self.device)
+                self.output_layer = Linear(layer_dims[-1], 1, dtype=self.dtype, device=self.device)
 
     def forward(self, x, x_n, y_n, get_embeddings=False):
         x = self.input_norm(x)
         if self.predictor=='nona':
             x_n = self.input_norm(x_n)
-
-        if self.mlp:
+        
+        if self.hl_sizes != list():
             for layer, norm in zip(self.fcn, self.norms):
                 x = norm(self.activation(layer(x)))
 
@@ -112,26 +116,30 @@ class NONA_NN(nn.Module):
             
         if self.predictor=='nona':
             if self.task in ['binary', 'regression']:
-                if get_embeddings:
-                    return [torch.clip(self.output(x, x_n, y_n), 0, 1), x]
-                else:
-                    return torch.clip(self.output(x, x_n, y_n), 0, 1)
+                output = torch.clip(self.output_layer(x, x_n, y_n), 0, 1)
+            
             elif self.task == 'ordinal':
-                return torch.clip(self.output(x, x_n, y_n), 0, self.classes-1)
+                output = torch.clip(self.output_layer(x, x_n, y_n), 0, self.classes-1)
+            
             elif self.task == 'multiclass':
                 y_n_ohe = one_hot(y_n.long()).to(self.device, self.dtype)
-                return torch.clip(self.output(x, x_n, y_n_ohe), 0, 1)
-            
+                output = torch.clip(self.output_layer(x, x_n, y_n_ohe), 0, 1)
         
         elif self.predictor=='dense':
-            # x = self.output(x)
+            logits = self.output_layer(x)
+            
             if self.task != 'multiclass':
-                if get_embeddings:
-                    return [((self.classes - 1) * sigmoid(self.output(x))).squeeze(), x]
-                else:
-                    return ((self.classes - 1) * sigmoid(x)).squeeze()
+                output = ((self.classes - 1) * sigmoid(logits)).squeeze()
+            
             else:
-                return softmax(x, dim=1)
+                output = softmax(logits, dim=1)
+        
+        if get_embeddings:
+            output = [output, x]
+        
+        return output
+            
+        
 
 class NONA_FT(nn.Module):
     def __init__(self, task, feature_extractor, hl_sizes, similarity='euclidean', predictor='nona', classes=2, agg=None, dtype=torch.float64, mlp=True):
@@ -154,7 +162,7 @@ class NONA_FT(nn.Module):
         for param in self.feature_extractor.parameters():
             param.requires_grad = True
 
-        self.nona_nn = NONA_NN(
+        self.nona = NONA_NN(
             task=self.task, 
             input_size=self.input_size, 
             hl_sizes=self.hl_sizes, 
@@ -169,4 +177,4 @@ class NONA_FT(nn.Module):
         x = self.feature_extractor(x)
         x_n = self.feature_extractor(x_n)
 
-        return self.nona_nn(x, x_n, y_n, get_embeddings)
+        return self.nona(x, x_n, y_n, get_embeddings)
