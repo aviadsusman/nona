@@ -26,6 +26,40 @@ def tensor(arr):
         arr = torch.Tensor(arr)
     return arr.to(dtype=torch.float32, device=device)
 
+def load_data_params(dataset):
+    if dataset == 'rsna':
+        task = 'regression'
+        data_df = pd.read_csv('data/rsna/all_features.csv')
+        transform = transforms.Compose([
+            transforms.Grayscale(num_output_channels=3),
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5], std=[0.5])
+            ])
+        fe = resnet18
+        data_percentage = 0.125
+
+    return task, data_df, fe, data_percentage, transform
+
+def get_fold_indices(data_df, seed, data_percentage=0.25, keep_unused=False):
+    id_dict = {} # data dict
+    
+    ids = data_df['id'].values
+
+    if dataset == 'rsna':
+        binned_labels = data_df['boneage binned'].values
+
+        # tvt = train/val/test
+        unused_ids , tvt_ids, _ , tvt_binned_labels = train_test_split(ids, binned_labels, test_size=data_percentage, stratify=binned_labels, random_state=seed)
+
+        if keep_unused: # for testing effect of neighbor sets at test time
+            id_dict['unused'] = unused_ids
+        
+        train_val_ids, id_dict['test'], train_val_binned_labels, _ = train_test_split(tvt_ids, tvt_binned_labels, stratify=tvt_binned_labels, test_size=0.25, random_state=seed)
+        id_dict['train'], id_dict['val'] = train_test_split(train_val_ids, stratify=train_val_binned_labels, test_size=0.15, random_state=seed)
+
+    return id_dict
+
 class RSNADataset(Dataset):
     def __init__(self, indices, transform=None):
         self.indices = indices
@@ -46,38 +80,6 @@ class RSNADataset(Dataset):
         label = self.features.loc[idx, 'boneage norm']
         
         return image, label
-
-def load_data_params(dataset):
-    if dataset == 'rsna':
-        task = 'regression'
-        data_df = pd.read_csv('data/rsna/all_features.csv')
-        transform = transforms.Compose([
-            transforms.Grayscale(num_output_channels=3),
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5], std=[0.5])
-            ])
-        fe = resnet18
-        data_percentage = 0.125
-    return task, data_df, transform, fe, data_percentage
-
-def get_fold_indices(data_df, seed, data_percentage=0.25, keep_unused=False):
-    id_dict = {} # data dict
-    
-    # if dataset == 'rsna':
-    ids = data_df['id'].values
-    binned_labels = data_df['boneage binned'].values
-
-    # tvt = train/val/test
-    unused_ids , tvt_ids, _ , tvt_binned_labels = train_test_split(ids, binned_labels, test_size=data_percentage, stratify=binned_labels, random_state=seed)
-
-    if keep_unused: # for testing effect of neighbor sets at test time
-        id_dict['unused'] = unused_ids
-    
-    train_val_ids, id_dict['test'], train_val_binned_labels, _ = train_test_split(tvt_ids, tvt_binned_labels, stratify=tvt_binned_labels, test_size=0.25, random_state=seed)
-    id_dict['train'], id_dict['val'] = train_test_split(train_val_ids, stratify=train_val_binned_labels, test_size=0.15, random_state=seed)
-
-    return id_dict
 
 class Score(nn.Module):
     def __init__(self, metric):
@@ -133,8 +135,7 @@ def mlps_train_eval(train, val, test, feature_extractor):
                         predictor=predictor, 
                         similarity=similarity, 
                         task=task, 
-                        dtype=torch.float32,
-                        skip_final_bn=True)
+                        dtype=torch.float32)
         
         criterion = crit_dict[task][0]()
 
@@ -224,7 +225,7 @@ if __name__ == '__main__':
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    task, data_df, transform, fe, data_percentage = load_data_params(dataset)
+    task, data_df, fe, data_percentage, transform = load_data_params(dataset)
     
     crit_dict = {'binary': [nn.BCELoss, 'accuracy'],
                  'multiclass': [nn.CrossEntropyLoss, 'accuracy'],
@@ -237,7 +238,7 @@ if __name__ == '__main__':
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)
     
-    scores_list = ["Skipping final bn"]
+    scores_list = ["test refactor"]
 
     for seed in range(seeds):
         print(f'Training and evaluating models for split {seed+1}.')

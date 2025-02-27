@@ -76,7 +76,6 @@ class NONA_NN(nn.Module):
         self.classes = classes
         self.agg = agg
         self.dtype = dtype
-        self.mlp = mlp
         self.skip_final_bn = skip_final_bn # temp attribute to test effect of final bn on embeddings/performance
 
         layer_dims = [self.input_size] + self.hl_sizes
@@ -94,7 +93,7 @@ class NONA_NN(nn.Module):
         self.input_norm = BatchNorm1d(self.input_size, dtype=self.dtype, device=self.device)
 
         if self.predictor=='nona':
-            self.output = NONA(similarity=self.similarity, agg=self.agg, dtype=self.dtype)
+            self.output_layer = NONA(similarity=self.similarity, agg=self.agg, dtype=self.dtype)
         
         elif self.predictor=='dense':
             if self.task == 'multiclass':
@@ -142,7 +141,7 @@ class NONA_NN(nn.Module):
         
 
 class NONA_FT(nn.Module):
-    def __init__(self, task, feature_extractor, hl_sizes, similarity='euclidean', predictor='nona', classes=2, agg=None, dtype=torch.float64, mlp=True):
+    def __init__(self, task, feature_extractor, hl_sizes, similarity='euclidean', predictor='nona', classes=2, agg=None, dtype=torch.float64, skip_final_bn=False):
         super(NONA_FT, self).__init__()
         self.task = task
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -153,7 +152,7 @@ class NONA_FT(nn.Module):
         self.classes = classes
         self.agg = agg
         self.dtype = dtype
-        self.mlp = mlp
+        self.skip_final_bn = skip_final_bn # temp attribute to test effect of final bn on embeddings/performance
 
         for name, module in self.feature_extractor.named_modules():
             pass
@@ -171,7 +170,7 @@ class NONA_FT(nn.Module):
             classes=self.classes, 
             agg=self.agg, 
             dtype=self.dtype, 
-            mlp=self.mlp)
+            skip_final_bn=self.skip_final_bn)
 
     def forward(self, x, x_n, y_n, get_embeddings=False):
         x = self.feature_extractor(x)

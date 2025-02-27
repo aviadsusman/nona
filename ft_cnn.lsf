@@ -6,7 +6,7 @@
 #BSUB -R rusage[mem=12000]
 #BSUB -n 1
 #BSUB -gpu num=1
-#BSUB -J rsnastrat
+#BSUB -J rsnatest
 #BSUB -W 48:00
 #BSUB -o /sc/arion/projects/pandeg01a/susmaa01/nona/outputs/ft/outputs_%J.stdout
 #BSUB -eo /sc/arion/projects/pandeg01a/susmaa01/nona/outputs/ft/outputs_%J.stderr
@@ -18,4 +18,4 @@ ml cuda/12.1.1
 ml cudnn/8.9.5-11
 export XLA_FLAGS=--xla_gpu_cuda_data_dir=/hpc/packages/minerva-centos7/cuda/12.0.1
 nvidia-smi
-python3 ft_eval.py --data rsna --savemodels
+python3 ft_cnn.py --data rsna --savemodels

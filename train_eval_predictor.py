@@ -22,7 +22,6 @@ from models import NONA, NONA_NN
 import time
 import sys
 
-
 def tensor(arr):
     if type(arr) != torch.Tensor:
         arr = torch.Tensor(arr)
