@@ -1,12 +1,12 @@
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
 import torch
 import torch.nn as nn
 from torch.nn.functional import one_hot
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 from torcheval.metrics.functional import mean_squared_error
+from torcheval.metrics.aggregation.auc import AUC
 import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
@@ -20,45 +20,12 @@ from models import NONA_FT
 import time
 from tqdm import tqdm
 import sys
+from utils import Score, load_data_params, get_fold_indices
 
 def tensor(arr):
     if type(arr) != torch.Tensor:
         arr = torch.Tensor(arr)
     return arr.to(dtype=torch.float32, device=device)
-
-def load_data_params(dataset):
-    if dataset == 'rsna':
-        task = 'regression'
-        data_df = pd.read_csv('data/rsna/all_features.csv')
-        transform = transforms.Compose([
-            transforms.Grayscale(num_output_channels=3),
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5], std=[0.5])
-            ])
-        fe = resnet18
-        data_percentage = 0.125
-
-    return task, data_df, fe, data_percentage, transform
-
-def get_fold_indices(data_df, seed, data_percentage=0.25, keep_unused=False):
-    id_dict = {} # data dict
-    
-    ids = data_df['id'].values
-
-    if dataset == 'rsna':
-        binned_labels = data_df['boneage binned'].values
-
-        # tvt = train/val/test
-        unused_ids , tvt_ids, _ , tvt_binned_labels = train_test_split(ids, binned_labels, test_size=data_percentage, stratify=binned_labels, random_state=seed)
-
-        if keep_unused: # for testing effect of neighbor sets at test time
-            id_dict['unused'] = unused_ids
-        
-        train_val_ids, id_dict['test'], train_val_binned_labels, _ = train_test_split(tvt_ids, tvt_binned_labels, stratify=tvt_binned_labels, test_size=0.25, random_state=seed)
-        id_dict['train'], id_dict['val'] = train_test_split(train_val_ids, stratify=train_val_binned_labels, test_size=0.15, random_state=seed)
-
-    return id_dict
 
 class RSNADataset(Dataset):
     def __init__(self, indices, transform=None, scaler=None):
@@ -79,7 +46,7 @@ class RSNADataset(Dataset):
             min_label, max_label = labels.min(), labels.max()
             self.scaler = [min_label, max_label]
         else:
-            min_label, max_label = scaler[0], scaler[1]
+            min_label, max_label = self.scaler[0], self.scaler[1]
         
         return (label - min_label) / (max_label - min_label)
     
@@ -92,23 +59,6 @@ class RSNADataset(Dataset):
         label = self.features.loc[idx, 'boneage']
         
         return image, self._scale_label(label)
-
-class Score(nn.Module):
-    def __init__(self, metric):
-        super(Score, self).__init__()
-        self.metric = metric
-
-    def forward(self, y_hat, y):
-        if self.metric == 'accuracy':
-            if y_hat.shape[1] > 1: #multiclass
-                y_hat = torch.argmax(y_hat, dim=1)
-            else:
-                y_hat = torch.round(y_hat)
-            
-            return (y_hat == y).float().mean().item()
-        
-        elif self.metric == 'mse':
-            return - mean_squared_error(y_hat, y).item() # Negative mse to simplify early stopping code
 
 def collate(batch):
     x, y = zip(*batch)
@@ -225,7 +175,7 @@ def mlps_train_eval(train, val, test, feature_extractor):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Dataset and other configs.")
-    parser.add_argument('--dataset', type=str, default='Which dataset to load in.', help='Path to data directory.')
+    parser.add_argument('--dataset', type=str, default='rsna', help='Path to data directory.')
     parser.add_argument('--seeds', type=int, default=10, help='How many splits of the data to train and test on.')
     parser.add_argument('--savemodels', action='store_true', default=False, help='Whether or not to save final models')
     args = parser.parse_args()
@@ -239,7 +189,7 @@ if __name__ == '__main__':
     
     task, data_df, fe, data_percentage, transform = load_data_params(dataset)
     
-    crit_dict = {'binary': [nn.BCELoss, 'accuracy'],
+    crit_dict = {'binary': [nn.BCELoss, 'auc'],
                  'multiclass': [nn.CrossEntropyLoss, 'accuracy'],
                  'ordinal': [nn.MSELoss, 'accuracy'],
                  'regression': [nn.MSELoss, 'mse']}
@@ -255,7 +205,7 @@ if __name__ == '__main__':
     for seed in range(seeds):
         print(f'Training and evaluating models for split {seed+1}.')
         
-        idx_dict = get_fold_indices(data_df, seed=seed, data_percentage=data_percentage)
+        idx_dict = get_fold_indices(dataset=dataset, data_df=data_df, seed=seed, data_percentage=data_percentage)
 
         scores = mlps_train_eval(**idx_dict, feature_extractor=fe)
 

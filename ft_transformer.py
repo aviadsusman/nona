@@ -1,12 +1,13 @@
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
 import torch
 import torch.nn as nn
 from torch.nn.functional import one_hot
 from torch.utils.data import Dataset, DataLoader
+from datasets import Dataset
 from transformers import AutoTokenizer, AutoModel
 from torcheval.metrics.functional import mean_squared_error
+from torcheval.metrics.aggregation.auc import AUC
 import torch.optim as optim
 import torchvision
 import time
@@ -18,37 +19,7 @@ from models import NONA_FT
 import time
 from tqdm import tqdm
 import sys
-
-def load_data_params(dataset, label):
-    if dataset == 'adresso':
-        if label == 'mmse':
-            task = 'regression'
-        elif label=='dx':
-            task = 'binary'
-        
-        data_df = pd.read_parquet('data/adresso/x_y.parquet')
-        tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
-        fe = AutoModel.from_pretrained
-        
-    return task, data_df, fe, tokenizer
-
-def get_fold_indices(data_df, seed):
-    id_dict = {} # data dict
-    
-    ids = data_df['id'].values
-
-    if dataset == 'adresso':
-        if label == 'mmse':
-            splitting_labels = data_df['mmse binned'].values
-        elif label == 'dx':
-            splitting_labels = data_df['dx'].values
-
-        id_dict['train'], id_dict['val'] = train_test_split(ids, test_size=0.15, stratify=splitting_labels, random_state=seed)
-
-    return id_dict
-
-from datasets import Dataset
-import pandas as pd
+from utils import Score, load_data_params, get_fold_indices
 
 class AdressoDataset:
     def __init__(self, label, tokenizer, scaler=None, ids=None):
@@ -97,23 +68,6 @@ class AdressoDataset:
     def get_dataset(self):
         return self.dataset
 
-class Score(nn.Module):
-    def __init__(self, metric):
-        super(Score, self).__init__()
-        self.metric = metric
-
-    def forward(self, y_hat, y):
-        if self.metric == 'accuracy':
-            if len(y_hat.shape) > 1 and y_hat.shape[1] > 1: #multiclass
-                y_hat = torch.argmax(y_hat, dim=1)
-            else:
-                y_hat = torch.round(y_hat)
-            
-            return (y_hat == y).float().mean().item()
-        
-        elif self.metric == 'mse':
-            return - mean_squared_error(y_hat, y).item() # Negative mse to simplify early stopping code
-
 def collate_fn(batch):
     input_ids = torch.tensor([item["input_ids"] for item in batch])
     attention_mask = torch.tensor([item["attention_mask"] for item in batch])
@@ -153,7 +107,8 @@ def mlps_train_eval(train, val, feature_extractor):
                         similarity=similarity, 
                         task=task, 
                         dtype=torch.float32,
-                        k=5)
+                        k=5
+                        )
         
         criterion = crit_dict[task][0]()
 
@@ -245,7 +200,7 @@ def mlps_train_eval(train, val, feature_extractor):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Dataset and other configs.")
-    parser.add_argument('--dataset', type=str, default='Which dataset to load in.', help='Path to data directory.')
+    parser.add_argument('--dataset', type=str, default='adresso', help='Path to data directory.')
     parser.add_argument('--label', type=str, default='mmse', help='Which label to predict')
     parser.add_argument('--seeds', type=int, default=10, help='How many splits of the data to train and test on.')
     parser.add_argument('--savemodels', action='store_true', default=False, help='Whether or not to save final models')
@@ -261,7 +216,7 @@ if __name__ == '__main__':
     
     task, data_df, fe, tokenizer = load_data_params(dataset, label)
     
-    crit_dict = {'binary': [nn.BCELoss, 'accuracy'],
+    crit_dict = {'binary': [nn.BCELoss, 'auc'],
                  'multiclass': [nn.CrossEntropyLoss, 'accuracy'],
                  'ordinal': [nn.MSELoss, 'accuracy'],
                  'regression': [nn.MSELoss, 'mse']}
@@ -272,18 +227,18 @@ if __name__ == '__main__':
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)
     
-    scores_list = ["200,50 dx label. mse loss"]
+    scores_list = ["200,50 dx label. auc score. k=5"]
 
     for seed in range(seeds):
         print(f'Training and evaluating models for split {seed+1}.')
         
-        idx_dict = get_fold_indices(data_df, seed=seed)
+        idx_dict = get_fold_indices(dataset=dataset, data_df=data_df, label=label, seed=seed)
 
         scores = mlps_train_eval(**idx_dict, feature_extractor=fe)
 
         for k,v in scores.items():
-            if score.metric == 'accuracy':
-                test_score = f'{round(100*v[0],3)}%'
+            if score.metric in ['accuracy', 'auc']:
+                test_score = f'{round(100*v[0],3)}'
             else:
                 test_score = f'{-round(v[0],3)}'
             print(f'{k}: {test_score} {score.metric} in {round(v[1],3)}s.')
