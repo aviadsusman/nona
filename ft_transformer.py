@@ -5,12 +5,10 @@ import torch
 import torch.nn as nn
 from torch.nn.functional import one_hot
 from torch.utils.data import Dataset, DataLoader
-from PIL import Image
+from transformers import AutoTokenizer, AutoModel
 from torcheval.metrics.functional import mean_squared_error
 import torch.optim as optim
 import torchvision
-import torchvision.transforms as transforms
-from torchvision.models import resnet18
 import time
 from copy import deepcopy
 import argparse
@@ -21,77 +19,83 @@ import time
 from tqdm import tqdm
 import sys
 
-def tensor(arr):
-    if type(arr) != torch.Tensor:
-        arr = torch.Tensor(arr)
-    return arr.to(dtype=torch.float32, device=device)
+def load_data_params(dataset, label):
+    if dataset == 'adresso':
+        if label == 'mmse':
+            task = 'regression'
+        elif label=='dx':
+            task = 'binary'
+        
+        data_df = pd.read_parquet('data/adresso/x_y.parquet')
+        tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+        fe = AutoModel.from_pretrained
+        
+    return task, data_df, fe, tokenizer
 
-def load_data_params(dataset):
-    if dataset == 'rsna':
-        task = 'regression'
-        data_df = pd.read_csv('data/rsna/all_features.csv')
-        transform = transforms.Compose([
-            transforms.Grayscale(num_output_channels=3),
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5], std=[0.5])
-            ])
-        fe = resnet18
-        data_percentage = 0.125
-
-    return task, data_df, fe, data_percentage, transform
-
-def get_fold_indices(data_df, seed, data_percentage=0.25, keep_unused=False):
+def get_fold_indices(data_df, seed):
     id_dict = {} # data dict
     
     ids = data_df['id'].values
 
-    if dataset == 'rsna':
-        binned_labels = data_df['boneage binned'].values
+    if dataset == 'adresso':
+        if label == 'mmse':
+            splitting_labels = data_df['mmse binned'].values
+        elif label == 'dx':
+            splitting_labels = data_df['dx'].values
 
-        # tvt = train/val/test
-        unused_ids , tvt_ids, _ , tvt_binned_labels = train_test_split(ids, binned_labels, test_size=data_percentage, stratify=binned_labels, random_state=seed)
-
-        if keep_unused: # for testing effect of neighbor sets at test time
-            id_dict['unused'] = unused_ids
-        
-        train_val_ids, id_dict['test'], train_val_binned_labels, _ = train_test_split(tvt_ids, tvt_binned_labels, stratify=tvt_binned_labels, test_size=0.25, random_state=seed)
-        id_dict['train'], id_dict['val'] = train_test_split(train_val_ids, stratify=train_val_binned_labels, test_size=0.15, random_state=seed)
+        id_dict['train'], id_dict['val'] = train_test_split(ids, test_size=0.15, stratify=splitting_labels, random_state=seed)
 
     return id_dict
 
-class RSNADataset(Dataset):
-    def __init__(self, indices, transform=None, scaler=None):
-        super(RSNADataset, self).__init__()
-        self.indices = indices
-        self.transform = transform
+from datasets import Dataset
+import pandas as pd
+
+class AdressoDataset:
+    def __init__(self, label, tokenizer, scaler=None, ids=None):
+        self.ids = ids
+        self.label = label
         self.scaler = scaler
 
-        self.features = pd.read_csv('data/rsna/all_features.csv')
-        self.features = self.features[self.features['id'].isin(self.indices)].reset_index()
-    
-    def __len__(self):
-        return len(self.indices)
+        full_df = pd.read_parquet('data/adresso/x_y.parquet')
 
-    def _scale_label(self, label):
-        if self.scaler == None:
-            labels = self.features[self.features['id'].isin(self.indices)]['boneage']
-            min_label, max_label = labels.min(), labels.max()
-            self.scaler = [min_label, max_label]
-        else:
-            min_label, max_label = scaler[0], scaler[1]
-        
-        return (label - min_label) / (max_label - min_label)
-    
-    def __getitem__(self, idx):
-        img_path = self.features.loc[idx, 'path']
-        image = Image.open(img_path)
+        # test and rest are labeled differently
+        id_char = 'd' if self.ids is None else 'o'
+        df = full_df[full_df['id'].str[4] == id_char]
 
-        if self.transform:
-            image = self.transform(image)
-        label = self.features.loc[idx, 'boneage']
-        
-        return image, self._scale_label(label)
+        if self.ids is not None: # not test
+            df = df[df['id'].isin(self.ids)]
+
+        self.df = df
+        self.dataset = Dataset.from_pandas(self.df)
+
+        self.tokenizer = tokenizer
+
+        if self.label == 'mmse' and self.scaler is None:
+            labels = self.df['mmse']
+            self.scaler = [labels.min(), labels.max()]
+
+        extra_cols = ["id", "dx", "mmse", "mmse binned", "path", "text", "__index_level_0__"]
+        self.dataset = self.dataset.map(self.process_example, remove_columns=extra_cols)
+
+    def len(self):
+        return len(self.df)
+
+    def scale_label(self, label):
+            min_label, max_label = self.scaler
+            return (label - min_label) / (max_label - min_label)
+
+    def process_example(self, example):
+        tokenized = self.tokenizer(example["text"], padding="max_length", truncation=True)
+
+        label = example[self.label]
+        if self.label == "mmse":
+            label = self.scale_label(label)
+
+        tokenized["labels"] = label
+        return tokenized
+
+    def get_dataset(self):
+        return self.dataset
 
 class Score(nn.Module):
     def __init__(self, metric):
@@ -100,7 +104,7 @@ class Score(nn.Module):
 
     def forward(self, y_hat, y):
         if self.metric == 'accuracy':
-            if y_hat.shape[1] > 1: #multiclass
+            if len(y_hat.shape) > 1 and y_hat.shape[1] > 1: #multiclass
                 y_hat = torch.argmax(y_hat, dim=1)
             else:
                 y_hat = torch.round(y_hat)
@@ -110,26 +114,27 @@ class Score(nn.Module):
         elif self.metric == 'mse':
             return - mean_squared_error(y_hat, y).item() # Negative mse to simplify early stopping code
 
-def collate(batch):
-    x, y = zip(*batch)
-    x = torch.stack(x).to(device).to(torch.float32)
-    y = torch.tensor(y, dtype=torch.float32, device=device)
-    return x, y
+def collate_fn(batch):
+    input_ids = torch.tensor([item["input_ids"] for item in batch])
+    attention_mask = torch.tensor([item["attention_mask"] for item in batch])
+    labels = torch.tensor([item["labels"] for item in batch], dtype=torch.float)
 
-def mlps_train_eval(train, val, test, feature_extractor):
+    return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
+
+def mlps_train_eval(train, val, feature_extractor):
     scores = {}
     
     learning_rate = 1e-5
     
-    train_dataset = RSNADataset(train, transform=transform, scaler=None)
-    train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True, collate_fn=collate)
-    all_train_loader = DataLoader(train_dataset, batch_size=len(train_dataset), shuffle=False, collate_fn=collate) # for use as neighbors with val and test
+    train_dataset = AdressoDataset(label=label, tokenizer=tokenizer, ids=train)
+    train_loader = train_dataloader = DataLoader(train_dataset.get_dataset(), batch_size=16, shuffle=True, collate_fn=collate_fn)
+    all_train_loader = DataLoader(train_dataset.get_dataset(), batch_size=train_dataset.len(), shuffle=True, collate_fn=collate_fn) # for use as neighbors with val and test
 
-    val_dataset = RSNADataset(val, transform=transform, scaler=train_dataset.scaler)
-    val_loader = DataLoader(val_dataset, batch_size=len(val_dataset), shuffle=True, collate_fn=collate)
+    val_dataset = AdressoDataset(label=label, tokenizer=tokenizer, ids=val, scaler=train_dataset.scaler)
+    val_loader = DataLoader(val_dataset.get_dataset(), batch_size=val_dataset.len(), shuffle=True, collate_fn=collate_fn)
 
-    test_dataset = RSNADataset(test, transform=transform, scaler=train_dataset.scaler)
-    test_loader = DataLoader(test_dataset, batch_size=len(test_dataset), shuffle=True, collate_fn=collate)
+    test_dataset = AdressoDataset(label=label, tokenizer=tokenizer, scaler=train_dataset.scaler)
+    test_loader = DataLoader(test_dataset.get_dataset(), batch_size=test_dataset.len(), shuffle=True, collate_fn=collate_fn)
 
     for predictor_head in ['nona euclidean', 'nona dot', 'dense']:
         
@@ -138,8 +143,8 @@ def mlps_train_eval(train, val, test, feature_extractor):
         predictor = predictor_head.split(" ")[0]
         similarity = predictor_head.split(" ")[-1]
 
-        if dataset == 'rsna': # reinitialize weights
-            feature_extractor_weights = feature_extractor(weights='DEFAULT')
+        if dataset == 'adresso': # reinitialize weights
+            feature_extractor_weights = feature_extractor("distilbert-base-uncased")
 
         hls = [200, 50]
         model = NONA_FT(feature_extractor=feature_extractor_weights, 
@@ -147,7 +152,8 @@ def mlps_train_eval(train, val, test, feature_extractor):
                         predictor=predictor, 
                         similarity=similarity, 
                         task=task, 
-                        dtype=torch.float32)
+                        dtype=torch.float32,
+                        k=5)
         
         criterion = crit_dict[task][0]()
 
@@ -163,7 +169,9 @@ def mlps_train_eval(train, val, test, feature_extractor):
             model.train()
             train_loss = 0.0
             print('Epoch:', epoch)
-            for batch_X, batch_y in tqdm(train_loader, desc="Train", file=sys.stdout):
+            for batch in tqdm(train_loader, desc="Train", file=sys.stdout):
+                batch_X = {key: val.to(device) for key, val in batch.items() if key!='labels'}
+                batch_y = batch['labels'].to(device)
                 outputs = model(batch_X, batch_X, batch_y)
                 loss = criterion(outputs, batch_y)
 
@@ -181,7 +189,13 @@ def mlps_train_eval(train, val, test, feature_extractor):
                 model.eval()
                 val_scores = []
                 with torch.no_grad():
-                    for (X_train, y_train), (X_val, y_val) in tqdm(zip(all_train_loader, val_loader), desc="Val", file=sys.stdout):
+                    for train_batch, val_batch in tqdm(zip(all_train_loader, val_loader), desc="Val", file=sys.stdout):
+                        X_train = {key: val.to(device) for key, val in train_batch.items() if key!='labels'}
+                        y_train = train_batch['labels'].to(device)
+                        
+                        X_val = {key: val.to(device) for key, val in val_batch.items() if key!='labels'}
+                        y_val = val_batch['labels'].to(device)
+                        
                         y_hat_val = model(X_val, X_train, y_train)  
                         val_scores.append(score(y_hat_val, y_val))
 
@@ -203,7 +217,13 @@ def mlps_train_eval(train, val, test, feature_extractor):
         y_tests = []
         model.load_state_dict(best_model_state)
         with torch.no_grad():
-            for (X_train, y_train), (X_test, y_test) in tqdm(zip(all_train_loader, test_loader), desc="Test", file=sys.stdout):
+            for train_batch, test_batch in tqdm(zip(all_train_loader, test_loader), desc="Test", file=sys.stdout):
+                X_train = {key: val.to(device) for key, val in train_batch.items() if key!='labels'}
+                y_train = train_batch['labels'].to(device)
+                
+                X_test = {key: val.to(device) for key, val in test_batch.items() if key!='labels'}
+                y_test = test_batch['labels'].to(device)
+                
                 y_hat_batch = model(X_test, X_train, y_train)  
                 y_hats.append(y_hat_batch)
                 y_tests.append(y_test)
@@ -226,10 +246,12 @@ def mlps_train_eval(train, val, test, feature_extractor):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Dataset and other configs.")
     parser.add_argument('--dataset', type=str, default='Which dataset to load in.', help='Path to data directory.')
+    parser.add_argument('--label', type=str, default='mmse', help='Which label to predict')
     parser.add_argument('--seeds', type=int, default=10, help='How many splits of the data to train and test on.')
     parser.add_argument('--savemodels', action='store_true', default=False, help='Whether or not to save final models')
     args = parser.parse_args()
     dataset = args.dataset
+    label = args.label
     save_models = args.savemodels
     seeds = args.seeds
 
@@ -237,7 +259,7 @@ if __name__ == '__main__':
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    task, data_df, fe, data_percentage, transform = load_data_params(dataset)
+    task, data_df, fe, tokenizer = load_data_params(dataset, label)
     
     crit_dict = {'binary': [nn.BCELoss, 'accuracy'],
                  'multiclass': [nn.CrossEntropyLoss, 'accuracy'],
@@ -250,12 +272,12 @@ if __name__ == '__main__':
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)
     
-    scores_list = ["test refactor"]
+    scores_list = ["200,50 dx label. mse loss"]
 
     for seed in range(seeds):
         print(f'Training and evaluating models for split {seed+1}.')
         
-        idx_dict = get_fold_indices(data_df, seed=seed, data_percentage=data_percentage)
+        idx_dict = get_fold_indices(data_df, seed=seed)
 
         scores = mlps_train_eval(**idx_dict, feature_extractor=fe)
 
