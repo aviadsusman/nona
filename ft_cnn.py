@@ -97,7 +97,8 @@ def mlps_train_eval(train, val, test, feature_extractor):
                         predictor=predictor, 
                         similarity=similarity, 
                         task=task, 
-                        dtype=torch.float32)
+                        dtype=torch.float32
+                        )
         
         criterion = crit_dict[task][0]()
 
@@ -200,7 +201,7 @@ if __name__ == '__main__':
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)
     
-    scores_list = ["test refactor"]
+    scores_list = ["200, 50 NONA. removed final bn. fixed dense output"]
 
     for seed in range(seeds):
         print(f'Training and evaluating models for split {seed+1}.')

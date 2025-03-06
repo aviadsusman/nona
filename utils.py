@@ -1,5 +1,5 @@
 import torch.nn as nn
-from torcheval.metrics.functional import mean_squared_error
+from torcheval.metrics.functional import mean_squared_error, binary_f1_score
 from torcheval.metrics.aggregation.auc import AUC
 from sklearn.model_selection import train_test_split
 import pandas as pd
@@ -16,7 +16,7 @@ class Score(nn.Module):
         if self.metric == 'auc':
             self.auc = AUC()
         
-        if self.metric in ['accuracy', 'auc']:
+        if self.metric in ['accuracy', 'auc', 'f1']:
             self.higher_is_better = True
         else:
             self.higher_is_better = False
@@ -32,11 +32,14 @@ class Score(nn.Module):
         
         elif self.metric == 'auc':
             output = self.auc.update(y_hat, y).compute().item()
+        
+        elif self.metric == 'f1':
+            output = binary_f1_score(y_hat, y).item()
 
         elif self.metric == 'mse':
             output = mean_squared_error(y_hat, y).item() # Negative mse to simplify early stopping code
         
-        return output if self.higher_is_better else -output
+        return output if self.higher_is_better else - output
 
 def load_data_params(dataset, label=None):
     if dataset == 'adresso':
@@ -91,7 +94,3 @@ def get_fold_indices(dataset, data_df, seed, label=None, data_percentage=0.25, k
         id_dict['train'], id_dict['val'] = train_test_split(ids, test_size=0.15, stratify=splitting_labels, random_state=seed)
 
     return id_dict
-
-
-
-

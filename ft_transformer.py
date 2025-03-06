@@ -106,8 +106,7 @@ def mlps_train_eval(train, val, feature_extractor):
                         predictor=predictor, 
                         similarity=similarity, 
                         task=task, 
-                        dtype=torch.float32,
-                        k=5
+                        dtype=torch.float32
                         )
         
         criterion = crit_dict[task][0]()
@@ -190,7 +189,7 @@ def mlps_train_eval(train, val, feature_extractor):
         scores[f'{predictor_head} mlp'] =  [score(y_hat, y_test), end-start]
         
         if save_models:
-            model_path = f'results/{dataset}/models/{script_start_time}/{predictor_head}_{seed}.pth'
+            model_path = f'results/{dataset}/{label}/models/{script_start_time}/{predictor_head}_{seed}.pth'
             model_dir = os.path.dirname(model_path)
             if not os.path.exists(model_dir):
                 os.makedirs(model_dir)
@@ -216,18 +215,18 @@ if __name__ == '__main__':
     
     task, data_df, fe, tokenizer = load_data_params(dataset, label)
     
-    crit_dict = {'binary': [nn.BCELoss, 'auc'],
+    crit_dict = {'binary': [nn.BCELoss, 'f1'],
                  'multiclass': [nn.CrossEntropyLoss, 'accuracy'],
                  'ordinal': [nn.MSELoss, 'accuracy'],
                  'regression': [nn.MSELoss, 'mse']}
     score = Score(crit_dict[task][1])
 
-    results_path = f'results/{dataset}/scores_{script_start_time}.pkl'
+    results_path = f'results/{dataset}/{label}/scores_{script_start_time}.pkl'
     results_dir = os.path.dirname(results_path)
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)
     
-    scores_list = ["200,50 dx label. auc score. k=5"]
+    scores_list = ["200,50 mmse with min sim."]
 
     for seed in range(seeds):
         print(f'Training and evaluating models for split {seed+1}.')
@@ -237,11 +236,8 @@ if __name__ == '__main__':
         scores = mlps_train_eval(**idx_dict, feature_extractor=fe)
 
         for k,v in scores.items():
-            if score.metric in ['accuracy', 'auc']:
-                test_score = f'{round(100*v[0],3)}'
-            else:
-                test_score = f'{-round(v[0],3)}'
-            print(f'{k}: {test_score} {score.metric} in {round(v[1],3)}s.')
+                test_score = abs(round(v[0],3))
+                print(f'{k}: {test_score} {score.metric} in {round(v[1],3)}s.')
 
         scores_list.append(scores)
         
