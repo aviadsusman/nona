@@ -7,7 +7,7 @@ class SoftKNNMask(nn.Module):
     '''
     def __init__(self):
         super(SoftKNNMask, self).__init__()
-        self.k = nn.Parameter(torch.randn(1))
+        self.k = nn.Parameter(torch.normal(0,0.1, (1,)))
     
     def forward(self, sim):
         # Converges to SoftSimMask when embedding space is sparse

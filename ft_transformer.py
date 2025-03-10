@@ -113,7 +113,7 @@ def mlps_train_eval(train, val, feature_extractor):
         
         criterion = crit_dict[task][0]()
         if hasattr(model.nona.output_layer, 'mask'):
-            print(model.nona.output_layer.mask.k.data ** 2)
+            print('t =', (model.nona.output_layer.mask.k.data ** 2).item())
         optimizer = optim.Adam(model.parameters(), lr=learning_rate)
         
         start = time.time()
@@ -172,7 +172,7 @@ def mlps_train_eval(train, val, feature_extractor):
             
             print(report)
             if hasattr(model.nona.output_layer, 'mask'):
-                print(model.nona.output_layer.mask.k.data ** 2)
+                print('t =', (model.nona.output_layer.mask.k.data ** 2).item())
             epoch += 1
         
         print("Evaluating", predictor_head) 
