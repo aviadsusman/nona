@@ -17,6 +17,7 @@ import argparse
 import os
 import pickle as pkl
 from models import NONA_FT
+from similarity_masks import SoftKNNMask, HardKNNMask, SoftSimMask, HardSimMask
 import time
 from tqdm import tqdm
 import sys
@@ -92,11 +93,12 @@ def mlps_train_eval(train, val, test, feature_extractor):
             feature_extractor_weights = feature_extractor(weights='DEFAULT')
 
         hls = [200, 50]
+        mask = SoftKNNMask()
         model = NONA_FT(feature_extractor=feature_extractor_weights, 
                         hl_sizes=hls, 
                         predictor=predictor, 
                         similarity=similarity, 
-                        task=task, 
+                        mask=mask,
                         dtype=torch.float32
                         )
         
@@ -201,7 +203,7 @@ if __name__ == '__main__':
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)
     
-    scores_list = ["200, 50 NONA. removed final bn. fixed dense output"]
+    scores_list = ["200, 50 soft mask."]
 
     for seed in range(seeds):
         print(f'Training and evaluating models for split {seed+1}.')

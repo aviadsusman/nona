@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from torch.nn.functional import one_hot
+from torch.nn.functional import one_hot, sigmoid
 from torch.utils.data import Dataset, DataLoader
 from datasets import Dataset
 from transformers import AutoTokenizer, AutoModel
@@ -16,6 +16,7 @@ import argparse
 import os
 import pickle as pkl
 from models import NONA_FT
+from similarity_masks import SoftKNNMask, HardKNNMask, SoftSimMask, HardSimMask
 import time
 from tqdm import tqdm
 import sys
@@ -101,18 +102,20 @@ def mlps_train_eval(train, val, feature_extractor):
             feature_extractor_weights = feature_extractor("distilbert-base-uncased")
 
         hls = [200, 50]
+        mask = SoftKNNMask()
         model = NONA_FT(feature_extractor=feature_extractor_weights, 
                         hl_sizes=hls, 
                         predictor=predictor, 
                         similarity=similarity, 
-                        task=task, 
+                        mask=mask, 
                         dtype=torch.float32
                         )
         
         criterion = crit_dict[task][0]()
-
+        if hasattr(model.nona.output_layer, 'mask'):
+            print(model.nona.output_layer.mask.k.data ** 2)
         optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-
+        
         start = time.time()
         patience = 10
         start_after_epoch = 5
@@ -127,6 +130,10 @@ def mlps_train_eval(train, val, feature_extractor):
                 batch_X = {key: val.to(device) for key, val in batch.items() if key!='labels'}
                 batch_y = batch['labels'].to(device)
                 outputs = model(batch_X, batch_X, batch_y)
+
+                if predictor=='dense' and label=='dx':
+                    outputs = sigmoid(outputs).squeeze()
+
                 loss = criterion(outputs, batch_y)
 
                 optimizer.zero_grad()
@@ -164,6 +171,8 @@ def mlps_train_eval(train, val, feature_extractor):
                 report = report + f': Val Score: {abs(val_score): .5f}'
             
             print(report)
+            if hasattr(model.nona.output_layer, 'mask'):
+                print(model.nona.output_layer.mask.k.data ** 2)
             epoch += 1
         
         print("Evaluating", predictor_head) 
@@ -226,7 +235,7 @@ if __name__ == '__main__':
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)
     
-    scores_list = ["200,50 mmse with min sim."]
+    scores_list = ["200,50 mmse with SoftKNNMask."]
 
     for seed in range(seeds):
         print(f'Training and evaluating models for split {seed+1}.')

@@ -6,8 +6,8 @@
 #BSUB -R rusage[mem=12000]
 #BSUB -n 1
 #BSUB -gpu num=1
-#BSUB -J rsna
-#BSUB -W 48:00
+#BSUB -J rsnasoftmask
+#BSUB -W 72:00
 #BSUB -o /sc/arion/projects/pandeg01a/susmaa01/nona/outputs/ft/outputs_%J.stdout
 #BSUB -eo /sc/arion/projects/pandeg01a/susmaa01/nona/outputs/ft/outputs_%J.stderr
 
