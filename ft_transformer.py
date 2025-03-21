@@ -14,13 +14,14 @@ import time
 from copy import deepcopy
 import argparse
 import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import pickle as pkl
 from models import NONA_FT
 from similarity_masks import SoftKNNMask, HardKNNMask, SoftSimMask, HardSimMask
 import time
 from tqdm import tqdm
 import sys
-from utils import Score, load_data_params, get_fold_indices
+from utils import Score, load_data_params, get_folds, tune_knn
 
 class AdressoDataset:
     def __init__(self, label, tokenizer, scaler=None, ids=None):
@@ -79,8 +80,6 @@ def collate_fn(batch):
 def mlps_train_eval(train, val, feature_extractor):
     scores = {}
     
-    learning_rate = 1e-5
-    
     train_dataset = AdressoDataset(label=label, tokenizer=tokenizer, ids=train)
     train_loader = train_dataloader = DataLoader(train_dataset.get_dataset(), batch_size=16, shuffle=True, collate_fn=collate_fn)
     all_train_loader = DataLoader(train_dataset.get_dataset(), batch_size=train_dataset.len(), shuffle=True, collate_fn=collate_fn) # for use as neighbors with val and test
@@ -112,9 +111,12 @@ def mlps_train_eval(train, val, feature_extractor):
                         )
         
         criterion = crit_dict[task][0]()
-        if hasattr(model.nona.output_layer, 'mask'):
-            print('t =', (model.nona.output_layer.mask.k.data ** 2).item())
-        optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+        # if hasattr(model.nona.output_layer, 'mask'):
+        #     print(f'k = {(model.nona.output_layer.mask.k.data).item()}, s = {(model.nona.output_layer.mask.s.data).item()}')
+        optimizer = torch.optim.Adam([
+            {'params': mask.parameters(), 'lr': 1e-3}, # Regular tuning of soft mask params.
+            {'params': [p for n, p in model.named_parameters() if not n.startswith("mask")], 'lr': 1e-5}  # Fine tuning
+        ])
         
         start = time.time()
         patience = 10
@@ -158,6 +160,9 @@ def mlps_train_eval(train, val, feature_extractor):
                         y_val = val_batch['labels'].to(device)
                         
                         y_hat_val = model(X_val, X_train, y_train)  
+                        if predictor=='dense' and label=='dx':
+                            y_hat_val = sigmoid(y_hat_val).squeeze()
+                        
                         val_scores.append(score(y_hat_val, y_val))
 
                 val_score = sum(val_scores) / len(val_scores)
@@ -171,8 +176,8 @@ def mlps_train_eval(train, val, feature_extractor):
                 report = report + f': Val Score: {abs(val_score): .5f}'
             
             print(report)
-            if hasattr(model.nona.output_layer, 'mask'):
-                print('t =', (model.nona.output_layer.mask.k.data ** 2).item())
+            # if hasattr(model.nona.output_layer, 'mask'):
+            #     print(f'k = {(model.nona.output_layer.mask.k.data).item()}, s = {(model.nona.output_layer.mask.s.data).item()}')
             epoch += 1
         
         print("Evaluating", predictor_head) 
@@ -187,7 +192,11 @@ def mlps_train_eval(train, val, feature_extractor):
                 X_test = {key: val.to(device) for key, val in test_batch.items() if key!='labels'}
                 y_test = test_batch['labels'].to(device)
                 
-                y_hat_batch = model(X_test, X_train, y_train)  
+                y_hat_batch, z_test, z_train = model(X_test, X_train, y_train, get_embeddings=True)
+                
+                if label=='dx':
+                    y_hat_batch = sigmoid(y_hat_batch).squeeze()  
+
                 y_hats.append(y_hat_batch)
                 y_tests.append(y_test)
 
@@ -195,7 +204,13 @@ def mlps_train_eval(train, val, feature_extractor):
         y_test = torch.cat(y_tests, dim=0)
         end = time.time()
         
-        scores[f'{predictor_head} mlp'] =  [score(y_hat, y_test), end-start]
+        scores[f'{predictor_head} mlp'] = [score(y_hat, y_test), end-start]
+        
+        print(f"Training and evaluating tuned knn with {predictor_head} final embeddings.") 
+        start = time.time()
+        y_hat_knn = tune_knn(z_train, z_test, y_train, y_test, task, score)
+        end = time.time()
+        scores[f'{predictor_head} tuned knn'] = [score(y_hat_knn, y_test), end-start]
         
         if save_models:
             model_path = f'results/{dataset}/{label}/models/{script_start_time}/{predictor_head}_{seed}.pth'
@@ -235,12 +250,12 @@ if __name__ == '__main__':
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)
     
-    scores_list = ["200,50 mmse with SoftKNNMask."]
+    scores_list = ["mask with var lr, bn, and tuned knn."]
 
     for seed in range(seeds):
         print(f'Training and evaluating models for split {seed+1}.')
         
-        idx_dict = get_fold_indices(dataset=dataset, data_df=data_df, label=label, seed=seed)
+        idx_dict = get_folds(dataset=dataset, seed=seed, label=label)
 
         scores = mlps_train_eval(**idx_dict, feature_extractor=fe)
 

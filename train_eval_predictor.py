@@ -225,7 +225,6 @@ def tune_knn(X_train, X_test, y_train, y_test):
     param_grid = {
         'n_neighbors': [3, 5, 7, 9, 11],
         'weights': ['uniform', 'distance'],
-        'metric': ['euclidean', 'manhattan', 'minkowski'],
         'p': [1, 2]
     }
 

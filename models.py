@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from torch.nn import Linear, Dropout, ReLU, Tanh, Sigmoid, BatchNorm1d, LayerNorm
 from torch.nn.functional import softmax, sigmoid, one_hot, normalize
-from similarity_masks import SoftKNNMask, HardKNNMask, SoftSimMask, HardSimMask
+from similarity_masks import SoftKNNMask, HardKNNMask, SoftSimMask, HardSimMask, SoftPointwiseKNN
 
 class NONA(nn.Module):
     '''
@@ -20,9 +20,8 @@ class NONA(nn.Module):
         
         self.similarity = similarity
         
-        self.mask = mask # Soft similarity mask to bias more similar neighbors.
-        if self.mask:
-            mask.to(self.device).to(self.dtype)
+        if mask:
+            self.mask = mask.to(self.device).to(self.dtype)
         
         self.agg = agg # For class similarity aggregation in multiclass prediciton.
 
@@ -46,10 +45,12 @@ class NONA(nn.Module):
             return sim_scores @ y_n
 
         elif self.agg == 'mean':
-            if train:
-                y_n -= torch.eye(len(y_n))
-            
             class_sums = y_n.sum(dim=0, keepdim=True).clamp(min=1)
+            
+            if train:
+                sim -= sim.diag().diag()
+                class_sums = (class_sums - 1).clamp(min=1)
+            
             y_n /= class_sums
 
             sim_scores = sim @ y_n
@@ -62,19 +63,24 @@ class NONA(nn.Module):
             x_n = self.bn(x_n)
 
         # Create similarity matrix between embeddings of X and embeddings of X_n
-        if self.similarity == 'euclidean':
-            sim = - torch.cdist(x, x_n, p=2)
-        
-        elif self.similarity == 'dot':
-            sim = x @ torch.t(x_n)
-        
-        elif self.similarity == 'cos':
-            x_norm = normalize(x, p=2, dim=1)
-            x_n_norm = normalize(x_n, p=2, dim=1)
-            sim = x_norm @ torch.t(x_n_norm)
-        
-        if self.mask:
-            sim = self.mask(sim)
+
+        if type(self.mask) == SoftPointwiseKNN:
+            sim = self.mask(x,x_n, similarity=self.similarity)
+
+        else:
+            if self.similarity == 'euclidean':
+                sim = - torch.cdist(x, x_n, p=2)
+            
+            elif self.similarity == 'dot':
+                sim = x @ torch.t(x_n)
+            
+            elif self.similarity == 'cos':
+                x_norm = normalize(x, p=2, dim=1)
+                x_n_norm = normalize(x_n, p=2, dim=1)
+                sim = x_norm @ torch.t(x_n_norm)
+            
+            if self.mask:
+                sim = self.mask(sim)
         
         train = torch.equal(x, x_n)
         return self.softmax_predict(sim, y_n, train)
@@ -109,7 +115,11 @@ class NONA_NN(nn.Module):
             self.output_layer = NONA(similarity=self.similarity, mask=self.mask, agg=self.agg, dtype=self.dtype)
             
             if hasattr(self.mask, 'min_max'): # Determine size of final embedding space for similarity normalization
-                self.output_layer.mask.min_max(similarity=self.similarity, activation='tanh', d=self.hl_sizes[-1])
+                self.output_layer.mask.min_max(similarity=self.similarity, activation='tanh', d=layer_dims[-1])
+            
+            elif hasattr(self.mask, 'input_dim'):
+                self.output_layer.mask.build_knn(layer_dims[-1])
+                self.output_layer.mask.to(self.device).to(self.dtype)
         
         elif self.predictor=='dense':
             if self.multiclass:
@@ -122,7 +132,7 @@ class NONA_NN(nn.Module):
             for layer, norm in zip(self.fcn, self.norms):
                 x = self.activation(layer(norm(x)))
 
-                if self.predictor=='nona':    
+                if self.predictor=='nona' or get_embeddings==True:
                     x_n = self.activation(layer(norm(x_n)))
             
         if self.predictor=='nona':
@@ -137,10 +147,10 @@ class NONA_NN(nn.Module):
             if self.multiclass:
                 output = softmax(logits, dim=1)
             else:
-                output = logits
+                output = logits.squeeze()
 
         if get_embeddings:
-            output = [output, x]
+            output = [output, x, x_n]
         
         return output
 
@@ -160,7 +170,7 @@ class NONA_FT(nn.Module):
         self.input_size = get_output_size(self.feature_extractor)
         self.hl_sizes = hl_sizes
         
-        self.predictor = predictor # for benchmarking
+        self.predictor = predictor # Dense for benchmarking
         self.similarity = similarity
         self.mask = mask
 

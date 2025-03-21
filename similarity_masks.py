@@ -8,16 +8,54 @@ class SoftKNNMask(nn.Module):
     def __init__(self):
         super(SoftKNNMask, self).__init__()
         self.k = nn.Parameter(torch.normal(0,0.1, (1,)))
-    
+        self.s = nn.Parameter(torch.normal(0,1, (1,)))
+
     def forward(self, sim):
         # Converges to SoftSimMask when embedding space is sparse
         sim_norm = (sim - sim.min(dim=1).values[:,None]) / (sim.max(dim=1).values - sim.min(dim=1).values)[:,None]
         sim_norm = sim_norm.clamp(min=1e-8) # To avoid log 0 error
 
         # self.k.exp() # equivalent to sig(k) / (1 - sig(k)). Allows mask to range over full space.
-        sim_mask = (self.k ** 2) * (sim_norm).log()
+        
+        # sim_mask = (self.k ** 2) * (sim_norm).log()
 
-        return sim + sim_mask
+        k = torch.sigmoid(self.k)
+        sim_mask = (self.s ** 2) * (k - sim_norm) * (sim_norm / k).log()
+        output = torch.where(sim_mask > k, torch.tensor(0.0, device=sim_norm.device), sim_mask)
+
+        return sim + output
+
+class SoftPointwiseKNN(nn.Module):
+    def __init__(self, input_dim=None):
+        super(SoftPointwiseKNN, self).__init__()
+        self.input_dim = input_dim
+        
+        if self.input_dim:
+            self.knn = nn.Linear(input_dim, 2)
+        
+    def build_knn(self, input_dim):
+        '''For building knn after initialization'''
+        self.input_dim = input_dim
+        self.knn = nn.Linear(input_dim, 2)
+
+    def forward(self, x, x_n, similarity):
+        params = torch.sigmoid(self.knn(x))
+        k, s = [col.unsqueeze(-1) for col in params.T]
+        
+        if similarity == 'euclidean':
+            sim = - torch.cdist(x, x_n, p=2)
+        elif similarity == 'dot':
+            sim = x @ torch.t(x_n)
+        
+        # Normalize sim for interpretable k param
+        sim = (sim - sim.min(dim=1).values[:,None]) / (sim.max(dim=1).values - sim.min(dim=1).values)[:,None]
+        sim = sim.clamp(min=1e-8) # To avoid log 0 error
+
+        # shift = torch.tan(s * torch.pi / 2) * (k-sim) * (sim / k).log()
+        shift = s/(1-s) * (k-sim) * (sim / k).log()
+        output = torch.where(sim <= k, shift, torch.zeros_like(sim))
+
+        return sim + output
 
 class HardKNNMask(nn.Module):
     '''
@@ -25,7 +63,7 @@ class HardKNNMask(nn.Module):
     '''
     def __init__(self, k, agg=None):
         super(HardKNNMask, self).__init__()
-        self.k = k + 1 # remove diagonal after 
+        self.k = k + 1 # K nearest neighbors + self similarity. Remove diagonal after. 
         self.agg = agg
     
     def forward(self, sim):
