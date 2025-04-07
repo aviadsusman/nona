@@ -1,5 +1,4 @@
 import torch
-import torch.nn as nn
 from torcheval.metrics.functional import binary_f1_score
 from torcheval.metrics.functional import mean_squared_error as mse
 from torcheval.metrics.aggregation.auc import AUC
@@ -12,11 +11,11 @@ import pandas as pd
 from transformers import AutoTokenizer, AutoModel
 import torchvision
 import torchvision.transforms as transforms
-from torchvision.models import resnet18, resnet34
-from torch.utils.data import Dataset, DataLoader, Subset
+from torchvision.models import resnet18, resnet34, resnet50
+from torch.utils.data import Dataset, DataLoader, random_split
 import numpy as np
 
-class Score(nn.Module):
+class Score(torch.nn.Module):
     def __init__(self, metric):
         super(Score, self).__init__()
         self.metric = metric
@@ -46,7 +45,7 @@ class Score(nn.Module):
 
         elif self.metric == 'mse':
             output = mse(y_hat, y).item() # Negative mse to simplify early stopping code
-        
+
         return output if self.higher_is_better else - output
 
 def load_data_params(dataset, label=None):
@@ -60,7 +59,14 @@ def load_data_params(dataset, label=None):
         tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
         fe = AutoModel.from_pretrained
         
-        return task, data_df, fe, tokenizer
+        return task, fe, tokenizer
+    
+    if dataset == 'drugs':
+        task = 'regression'
+        tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased") # "huawei-noah/TinyBERT_General_4L_312D"
+        fe = AutoModel.from_pretrained
+
+        return task, fe, tokenizer
     
     elif dataset == 'rsna':
         task = 'regression'
@@ -81,6 +87,8 @@ def get_folds(dataset, seed, label=None):
         ids = data_df['id'].values
         binned_labels = data_df['boneage binned'].values
 
+        # _, ids, _, binned_labels = train_test_split(ids, binned_labels, test_size=0.125, stratify=binned_labels, random_state=seed)
+
         tv_ids, fold_dict['test'], tv_labels, _ = train_test_split(ids, binned_labels, test_size=0.2, stratify=binned_labels, random_state=seed)
         
         fold_dict['train'], fold_dict['val'], _, _ = train_test_split(tv_ids, tv_labels, stratify=tv_labels, test_size=0.15, random_state=seed)
@@ -98,6 +106,8 @@ def get_folds(dataset, seed, label=None):
 
         fold_dict['train'], fold_dict['val'] = train_test_split(ids, test_size=0.15, stratify=splitting_labels, random_state=seed)
 
+        fold_dict['test'] = None
+
         return fold_dict
 
     elif dataset == 'cifar':
@@ -105,27 +115,42 @@ def get_folds(dataset, seed, label=None):
         np.random.seed(seed)
 
         transform = transforms.Compose([
-            transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2023, 0.1994, 0.2010])
-            ])
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        ])
 
-        tvset = torchvision.datasets.CIFAR10(root='data/cifar',
+        tv_set = torchvision.datasets.CIFAR10(root='data/cifar',
                                                   download=True,
                                                   train=True,
                                                   transform=transform)
-        testset = torchvision.datasets.CIFAR10(root='data/cifar',
-                                                    download=False,
+        test_set = torchvision.datasets.CIFAR10(root='data/cifar',
+                                                    download=True,
                                                     train=False,
                                                     transform=transform)
 
-        val_subset_size = round(len(tvset) * 0.15)
-        val_indices = np.random.choice(len(tvset), val_subset_size, replace=False)
+        val_percentage = 0.15
+        train_size = int((1-val_percentage) * len(tv_set))
+        val_size = len(tv_set) - train_size 
 
-        train_subset = Subset(tvset, ~val_indices)
-        val_subset = Subset(tvset, val_indices)
+        train_set, val_set = random_split(tv_set, [train_size, val_size])
 
-        return {'train': train_subset, 'val': val_subset, 'test': testset}
+        return {'train': train_set, 'val': val_set, 'test': test_set}
+    
+    elif dataset == 'drugs':
+        data_df = pd.read_csv('data/drug_reviews/all_data.csv')
+        fold_dict = {}
+        
+        ids = data_df.index
+        labels = data_df['rating']
+        
+        # _, ids, _, labels = train_test_split(ids, labels, test_size=0.01, stratify=labels, random_state=seed)
+
+        tv_ids, fold_dict['test'], tv_labels, _ = train_test_split(ids, labels, test_size=0.2, stratify=labels, random_state=seed)
+
+        fold_dict['train'], fold_dict['val'], _, _ = train_test_split(tv_ids, tv_labels, test_size=0.15, stratify=tv_labels, random_state=seed)
+        
+        return fold_dict
+
 
 def tune_knn(X_train, X_test, y_train, y_test, task, score):
 
@@ -164,3 +189,9 @@ def tune_knn(X_train, X_test, y_train, y_test, task, score):
     y_hat_knn = best_knn.predict(X_test)
 
     return torch.tensor(y_hat_knn, dtype=y_test.dtype).to(y_test.device)
+
+def sliced(data):
+    if isinstance(data, torch.Tensor):
+        return data[:2]
+    elif isinstance(data, dict):
+        return {k:v[:2] for k,v in data.items()}

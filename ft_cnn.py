@@ -1,34 +1,35 @@
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn as nn
+from torch.nn import MSELoss, BCELoss, CrossEntropyLoss
 from torch.nn.functional import one_hot
-from torch.utils.data import Dataset, DataLoader
-from PIL import Image
-from torcheval.metrics.functional import mean_squared_error
-from torcheval.metrics.aggregation.auc import AUC
-import torch.optim as optim
-import torchvision
+from torch.utils.data import Dataset, DataLoader, Subset
+from torch.optim import Adam
 import torchvision.transforms as transforms
-from torchvision.models import resnet18
+from PIL import Image
+from models import NONA_FT
+import similarity_masks as s
+from utils import Score, load_data_params, get_folds, tune_knn
+import argparse
 import time
 from copy import deepcopy
-import argparse
-import os
 import pickle as pkl
-from models import NONA_FT
-from similarity_masks import SoftKNNMask, HardKNNMask, SoftSimMask, HardSimMask, SoftPointwiseKNN
-import time
 from tqdm import tqdm
 import sys
-from utils import Score, load_data_params, get_folds, tune_knn
+import os
 
 class RSNADataset(Dataset):
-    def __init__(self, indices, transform=None, label_scaler=None):
+    def __init__(self, indices, scaler=None):
         super(RSNADataset, self).__init__()
         self.indices = indices
-        self.transform = transform
-        self.label_scaler = label_scaler
+        self.transform = transforms.Compose([
+            transforms.Grayscale(num_output_channels=3),
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5], std=[0.5])
+            ])
+        # self.scaler = scaler
+        self.scaler = [1, 228]
 
         self.features = pd.read_csv('data/rsna/all_features.csv')
         self.features = self.features[self.features['id'].isin(self.indices)].reset_index()
@@ -36,30 +37,9 @@ class RSNADataset(Dataset):
     def __len__(self):
         return len(self.indices)
 
-    def _scale_tensor(self, tensor):
-        if not self.transform:
-            pixel_sum = 0
-            pixel_sq_sum = 0
-            num_pixels = 0
-            for idx in tqdm(self.indices, desc="tensor scalers", file=sys.stdout):
-                img_tensor = torch.load(f'data/rsna/tensors/{idx}.pt').float()
-                pixels = img_tensor[0].view(-1)  # Only use the first channel
-
-                pixel_sum += pixels.sum()
-                pixel_sq_sum += (pixels ** 2).sum()
-                num_pixels += pixels.numel()
-
-            train_mean = [(pixel_sum / num_pixels).item()] * 3 # 3 channels
-            train_var = pixel_sq_sum / num_pixels - train_mean[0] ** 2
-            train_std = [torch.sqrt(train_var).item()] * 3
-
-            self.transform = transforms.Normalize(mean=train_mean, std=train_std) 
-
-        return self.transform(tensor)
-
     def _scale_label(self, label):
-        if not self.label_scaler:
-            labels = self.features['boneage']
+        if self.scaler == None:
+            labels = self.features[self.features['id'].isin(self.indices)]['boneage']
             min_label, max_label = labels.min(), labels.max()
             self.scaler = [min_label, max_label]
         else:
@@ -68,10 +48,15 @@ class RSNADataset(Dataset):
         return (label - min_label) / (max_label - min_label)
     
     def __getitem__(self, idx):
-        img_tensor = torch.load(f'data/rsna/tensors/{self.indices[idx]}.pt')
+        img_path = self.features.loc[idx, 'path']
+        image = Image.open(img_path)
+
+        if self.transform:
+            image = self.transform(image)
         label = self.features.loc[idx, 'boneage']
         
-        return self._scale_tensor(img_tensor) , self._scale_label(label)
+        return image, self._scale_label(label)
+
 def collate(batch):
     x, y = zip(*batch)
     x = torch.stack(x).to(device).to(torch.float32)
@@ -80,73 +65,78 @@ def collate(batch):
 
 def mlps_train_eval(train, val, test, feature_extractor):
     scores = {}
-    
+
+    # Prep data loaders
+    # It is necessary to shuffle training data so samples can use new
+    # neighbors between batches.
     if dataset == 'rsna':
         train_dataset = RSNADataset(train)
-        train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True, collate_fn=collate)
-        all_train_loader = DataLoader(train_dataset, batch_size=len(train_dataset), shuffle=False, collate_fn=collate) # for use as neighbors with val and test
-
-        transform = train_dataset.transform
-        scaler = train_dataset.label_scaler
-
-        val_dataset = RSNADataset(val, transform=transform, label_scaler=scaler)
-        val_loader = DataLoader(val_dataset, batch_size=len(val_dataset), shuffle=True, collate_fn=collate)
-
-        test_dataset = RSNADataset(test, transform=transform, label_scaler=scaler)
-        test_loader = DataLoader(test_dataset, batch_size=len(test_dataset), shuffle=True, collate_fn=collate)
+        train_loader = DataLoader(train_dataset, batch_size=128, shuffle=true, collate_fn=collate)
+        
+        val_dataset = RSNADataset(val)
+        val_loader = DataLoader(val_dataset, batch_size=128, collate_fn=collate)
+        
+        test_dataset = RSNADataset(test)
+        test_loader = DataLoader(test_dataset, batch_size=128, collate_fn=collate)
     
     elif dataset == 'cifar':
         train_loader = DataLoader(train, batch_size=128, shuffle=True, collate_fn=collate)
-        all_train_loader = DataLoader(train, batch_size=len(train), shuffle=False, collate_fn=collate)
-        val_loader = DataLoader(val, batch_size=len(val), shuffle=True, collate_fn=collate)
-        test_loader = DataLoader(test, batch_size=len(test), shuffle=False, collate_fn=collate)
+        val_loader = DataLoader(val, batch_size=128, collate_fn=collate)
+        test_loader = DataLoader(test, batch_size=128, collate_fn=collate)
 
-    for predictor_head in ['nona euclidean', 'nona dot']:#, 'dense']:
+    for predictor_head in ['nona l2', 'nona l1']:#, 'nona dot', 'dense']:
         
         print("Training", predictor_head) 
         
         predictor = predictor_head.split(" ")[0]
         similarity = predictor_head.split(" ")[-1]
 
+        # Build model
         feature_extractor_weights = feature_extractor(weights='DEFAULT')
         mc = 10 if dataset=='cifar' else None
-        agg = 'mean' if dataset == 'cifar' else None
+        # agg = 'mean' if dataset == 'cifar' else None
+        agg = None
         hls = [200, 50]
-        mask = SoftPointwiseKNN()
+        mask = s.LnSmoothStep()
         model = NONA_FT(feature_extractor=feature_extractor_weights, 
                         hl_sizes=hls, 
                         predictor=predictor, 
                         similarity=similarity, 
                         mask=mask,
                         multiclass=mc,
+                        agg=agg,
                         dtype=torch.float32
                         )
-        
+
         criterion = crit_dict[task][0]()
-        
-        # if hasattr(model.nona.output_layer, 'mask'):
-        #     print(f'k = {(model.nona.output_layer.mask.k.data).item()}, s = {(model.nona.output_layer.mask.s.data).item()}')
-        optimizer = torch.optim.Adam([
-            {'params': mask.parameters(), 'lr': 1e-3}, # Regular tuning of soft mask params.
-            {'params': [p for n, p in model.named_parameters() if not n.startswith("mask")], 'lr': 1e-5}  # Fine tuning
-        ])
+
+        # Variable learning rates for finetuning feature extractor and training similarity shift params
+        optimizer = Adam(model.parameters(), lr=1e-5)
+        # optimizer = Adam([
+        #     {'params': mask.parameters(), 'lr': 1e-3}, # Regular tuning of soft mask params.
+        #     {'params': [p for n, p in model.named_parameters() if not n.startswith("mask")], 'lr': 1e-5}  # Fine tuning
+        # ])
 
         start = time.time()
+        
+        # Early stopping params
         patience = 10
         start_after_epoch = 5
         count = 0
         best_val_score = float('-inf')
+
+        # Train
         epoch = 1
-        while count < patience:
+        while count < patience: 
             model.train()
             train_loss = 0.0
             print('Epoch:', epoch)
-            for batch_X, batch_y in tqdm(train_loader, desc="Train", file=sys.stdout):
-                outputs = model(batch_X, batch_X, batch_y)
-                if dataset=='cifar':
-                    batch_y = batch_y.to(torch.long) 
-                loss = criterion(outputs, batch_y)
+            for X, y in tqdm(train_loader, desc="Train", file=sys.stdout):
+                outputs = model(X, X, y)
 
+                if dataset=='cifar':
+                    y = y.to(torch.long) 
+                loss = criterion(outputs, y)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
@@ -156,19 +146,47 @@ def mlps_train_eval(train, val, test, feature_extractor):
             train_loss /= len(train_loader)
             report = f"Train Loss: {train_loss: .5f}"
 
-            # Early stopping
+            # Early stopping on val set
             if epoch > start_after_epoch:
                 model.eval()
-                val_scores = []
+               
+                y_val = []
+                y_hat_val = []
+
                 with torch.no_grad():
-                    for (X_train, y_train), (X_val, y_val) in tqdm(zip(all_train_loader, val_loader), desc="Val", file=sys.stdout):
-                        y_hat_val = model(X_val, X_train, y_train)
-                        if dataset == 'cifar':
-                            y_val = y_val.to(torch.long)  
-                        val_scores.append(score(y_hat_val, y_val))
+                    if predictor_head == 'dense':
+                        for X, y in val_loader:
+                            y_val.append(y)
+                            y_hat = model(X, X, y)
+                            y_hat_val.append(y_hat)
+                    else:
+                        z_train = []
+                        y_train = []
+                        for (X, y) in train_loader: # Get embeddings for full train set
+                            y_train.append(y)
+                        
+                            _, z, _ = model(X, X[:2], y[:2], get_embeddings=True)
+                            z_train.append(z)
+                        
+                        z_train = torch.cat(z_train, dim=0)
+                        y_train = torch.cat(y_train, dim=0)
+                        if dataset == 'cifar':            
+                            y_train = one_hot(y_train.long()).to(model.device, model.dtype)  
 
-                val_score = sum(val_scores) / len(val_scores)
-
+                        for (X, y) in val_loader:
+                            y_val.append(y)
+                           
+                            _, z, _ = model(X, X[:2], y[:2], get_embeddings=True)
+                            y_hat = torch.clip(model.nona.output_layer(z, z_train, y_train), 0, 1)
+                            y_hat_val.append(y_hat)
+                        
+                y_val = torch.cat(y_val, dim=0)
+                y_hat_val = torch.cat(y_hat_val, dim=0)
+                
+                if dataset == 'cifar':
+                    y_val = y_val.to(torch.long)
+                
+                val_score = score(y_hat_val, y_val)
                 if val_score > best_val_score:
                     best_val_score = val_score
                     best_model_state = deepcopy(model.state_dict())
@@ -178,41 +196,61 @@ def mlps_train_eval(train, val, test, feature_extractor):
                 report = report + f': Val Score: {abs(val_score): .5f}'
             
             print(report)
-            # if hasattr(model.nona.output_layer, 'mask'):
-            #     print(f'k = {(model.nona.output_layer.mask.k.data).item()}, s = {(model.nona.output_layer.mask.s.data).item()}')
             epoch += 1
-        
+
+        # Eval on test set and extract embeddings for KNN
         print("Evaluating", predictor_head) 
-        y_hats = []
-        y_tests = []
         model.load_state_dict(best_model_state)
+        z_test = []
+        y_test = []
+        y_hat_test = []
         with torch.no_grad():
-            for (X_train, y_train), (X_test, y_test) in tqdm(zip(all_train_loader, test_loader), desc="Test", file=sys.stdout):
-                y_hat_batch, z_test, z_train = model(X_test, X_train, y_train, get_embeddings=True)
-                y_hats.append(y_hat_batch)
-                y_tests.append(y_test)
+            if predictor=='dense':
+                z_train = []
+                y_train = []
+                for (X, y) in train_loader:
+                    y_train.append(y)
+                    _, z, _ = model(X, X[:2], y[:2], get_embeddings=True)
+                    z_train.append(z)
+                z_train = torch.cat(z_train, dim=0)
+                y_train = torch.cat(y_train, dim=0)
 
-        y_hat = torch.cat(y_hats, dim=0)
-        y_test = torch.cat(y_tests, dim=0)
-        if dataset == 'cifar':
-            y_train = y_train.to(torch.long)
-            y_test = y_test.to(torch.long)
-        end = time.time()
-        
-        scores[f'{predictor_head} mlp'] =  [score(y_hat, y_test), end-start]
+            for i, (X, y) in enumerate(test_loader):
+                y_test.append(y)
+                y_hat, z, _ = model(X, X[:2], y[:2], get_embeddings=True)
+                y_hat_test.append(y_hat)
+                z_test.append(z)
 
-        print(f"Training and evaluating tuned knn with {predictor_head} final embeddings.") 
-        start = time.time()
-        y_hat_knn = tune_knn(z_train, z_test, y_train, y_test, task, score)
+                if predictor == 'nona':
+                    y_hat = torch.clip(model.nona.output_layer(z, z_train, y_train), 0, 1)
+                    y_hat_test[i] = y_hat
+            
+        z_test = torch.cat(z_test, dim=0)
+        y_test = torch.cat(y_test, dim=0)
+        y_hat_test = torch.cat(y_hat_test, dim=0)
         end = time.time()
-        scores[f'{predictor_head} tuned knn'] = [score(y_hat_knn, y_test), end-start]
-        
+        scores[f'{predictor_head} mlp'] =  [score(y_hat_test, y_test), end-start]
+
+        # Save models
         if save_models:
             model_path = f'results/{dataset}/models/{script_start_time}/{predictor_head}_{seed}.pth'
             model_dir = os.path.dirname(model_path)
             if not os.path.exists(model_dir):
                 os.makedirs(model_dir)
-            torch.save(model.state_dict(), model_path)
+            model_objs = {'model weights': model.state_dict(),
+            'z_train': z_train, 'z_test': z_test, 
+            'y_train': y_train, 'y_test': y_test}
+            torch.save(model_objs, model_path)
+
+        # Fine tune a KNN model on final embeddings
+        if dataset == 'cifar':
+            y_train = y_train.to(torch.long)
+            y_test = y_test.to(torch.long)
+        print(f"Training and evaluating tuned knn with {predictor_head} final embeddings.") 
+        start = time.time()
+        y_hat_knn = tune_knn(z_train, z_test, y_train, y_test, task, score)
+        end = time.time()
+        scores[f'{predictor_head} tuned knn'] = [score(y_hat_knn, y_test), end-start]
 
     return scores
 
@@ -232,10 +270,10 @@ if __name__ == '__main__':
     
     task, fe = load_data_params(dataset)
     
-    crit_dict = {'binary': [nn.BCELoss, 'auc'],
-                 'multiclass': [nn.CrossEntropyLoss, 'accuracy'],
-                 'ordinal': [nn.MSELoss, 'accuracy'],
-                 'regression': [nn.MSELoss, 'mse']}
+    crit_dict = {'binary': [BCELoss, 'auc'],
+                 'multiclass': [CrossEntropyLoss, 'accuracy'],
+                 'ordinal': [MSELoss, 'accuracy'],
+                 'regression': [MSELoss, 'mse']}
     score = Score(crit_dict[task][1])
 
     results_path = f'results/{dataset}/scores_{script_start_time}.pkl'
@@ -243,7 +281,7 @@ if __name__ == '__main__':
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)
     
-    scores_list = ["200, 50 SoftPointWiseKNN. bn + var lr (1e-3). s/(1-s) scaling."]
+    scores_list = ["LnSmoothStep"]
 
     for seed in range(seeds):
         print(f'Training and evaluating models for split {seed+1}.')

@@ -1,15 +1,14 @@
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn as nn
+from torch.nn import MSELoss, BCELoss, CrossEntropyLoss
 from torch.nn.functional import one_hot, sigmoid
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 from datasets import Dataset
 from transformers import AutoTokenizer, AutoModel
 from torcheval.metrics.functional import mean_squared_error
 from torcheval.metrics.aggregation.auc import AUC
 import torch.optim as optim
-import torchvision
 import time
 from copy import deepcopy
 import argparse
@@ -17,11 +16,11 @@ import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import pickle as pkl
 from models import NONA_FT
-from similarity_masks import SoftKNNMask, HardKNNMask, SoftSimMask, HardSimMask
+from similarity_masks import SoftKNNMask, HardKNNMask, SoftSimMask, HardSimMask, SoftPointwiseKNN
 import time
 from tqdm import tqdm
 import sys
-from utils import Score, load_data_params, get_folds, tune_knn
+from utils import Score, load_data_params, get_folds, tune_knn, sliced
 
 class AdressoDataset:
     def __init__(self, label, tokenizer, scaler=None, ids=None):
@@ -70,6 +69,42 @@ class AdressoDataset:
     def get_dataset(self):
         return self.dataset
 
+class DrugReviewDataset:
+    def __init__(self, ids, tokenizer):
+        self.ids = ids
+
+        full_df = pd.read_csv('data/drug_reviews/all_data.csv')
+
+        df = full_df.iloc[ids]
+
+        self.df = df
+        self.dataset = Dataset.from_pandas(self.df)
+
+        self.tokenizer = tokenizer
+
+        extra_cols = ['review', 'rating', '__index_level_0__']
+        self.dataset = self.dataset.map(self.process_example, remove_columns=extra_cols)
+
+    def len(self):
+        return len(self.df)
+
+    def scale_label(self, label):
+        # Min label = 1, max = 10
+        return label / 10
+
+
+    def process_example(self, example):
+        tokenized = self.tokenizer(example['review'], padding='max_length', truncation=True)
+
+        label = example['rating']
+        label = self.scale_label(label)
+
+        tokenized['labels'] = label
+        return tokenized
+
+    def get_dataset(self):
+        return self.dataset
+
 def collate_fn(batch):
     input_ids = torch.tensor([item["input_ids"] for item in batch])
     attention_mask = torch.tensor([item["attention_mask"] for item in batch])
@@ -77,31 +112,42 @@ def collate_fn(batch):
 
     return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
 
-def mlps_train_eval(train, val, feature_extractor):
+def mlps_train_eval(train, val, test, feature_extractor):
     scores = {}
     
-    train_dataset = AdressoDataset(label=label, tokenizer=tokenizer, ids=train)
-    train_loader = train_dataloader = DataLoader(train_dataset.get_dataset(), batch_size=16, shuffle=True, collate_fn=collate_fn)
-    all_train_loader = DataLoader(train_dataset.get_dataset(), batch_size=train_dataset.len(), shuffle=True, collate_fn=collate_fn) # for use as neighbors with val and test
+    # It is necessary to shuffle training data so samples can use new
+    # neighbors between batches.
+    if dataset == 'adresso':
+        train_dataset = AdressoDataset(label=label, tokenizer=tokenizer, ids=train)
+        train_loader = DataLoader(train_dataset.get_dataset(), batch_size=16, shuffle=True, collate_fn=collate_fn)
 
-    val_dataset = AdressoDataset(label=label, tokenizer=tokenizer, ids=val, scaler=train_dataset.scaler)
-    val_loader = DataLoader(val_dataset.get_dataset(), batch_size=val_dataset.len(), shuffle=True, collate_fn=collate_fn)
+        val_dataset = AdressoDataset(label=label, tokenizer=tokenizer, ids=val, scaler=train_dataset.scaler)
+        val_loader = DataLoader(val_dataset.get_dataset(), batch_size=val_dataset.len(), collate_fn=collate_fn)
 
-    test_dataset = AdressoDataset(label=label, tokenizer=tokenizer, scaler=train_dataset.scaler)
-    test_loader = DataLoader(test_dataset.get_dataset(), batch_size=test_dataset.len(), shuffle=True, collate_fn=collate_fn)
+        test_dataset = AdressoDataset(label=label, tokenizer=tokenizer, scaler=train_dataset.scaler)
+        test_loader = DataLoader(test_dataset.get_dataset(), batch_size=test_dataset.len(), collate_fn=collate_fn)
+    
+    elif dataset == 'drugs':
+        train_dataset = DrugReviewDataset(ids=train, tokenizer=tokenizer)
+        train_loader = DataLoader(train_dataset.get_dataset(), batch_size=128, shuffle=True, collate_fn=collate_fn)
+        
+        val_dataset = DrugReviewDataset(ids=val, tokenizer=tokenizer)
+        val_loader = DataLoader(val_dataset.get_dataset(), batch_size=128, collate_fn=collate_fn)
 
-    for predictor_head in ['nona euclidean', 'nona dot', 'dense']:
+        test_dataset = DrugReviewDataset(ids=test, tokenizer=tokenizer)
+        test_loader = DataLoader(test_dataset.get_dataset(), batch_size=128, collate_fn=collate_fn)
+
+    for predictor_head in ['nona l2', 'nona l1', 'nona dot', 'dense']:
         
         print("Training", predictor_head) 
         
         predictor = predictor_head.split(" ")[0]
         similarity = predictor_head.split(" ")[-1]
 
-        if dataset == 'adresso': # reinitialize weights
-            feature_extractor_weights = feature_extractor("distilbert-base-uncased")
+        feature_extractor_weights = feature_extractor("distilbert-base-uncased")
 
         hls = [200, 50]
-        mask = SoftKNNMask()
+        mask = SoftPointwiseKNN()
         model = NONA_FT(feature_extractor=feature_extractor_weights, 
                         hl_sizes=hls, 
                         predictor=predictor, 
@@ -111,12 +157,12 @@ def mlps_train_eval(train, val, feature_extractor):
                         )
         
         criterion = crit_dict[task][0]()
-        # if hasattr(model.nona.output_layer, 'mask'):
-        #     print(f'k = {(model.nona.output_layer.mask.k.data).item()}, s = {(model.nona.output_layer.mask.s.data).item()}')
-        optimizer = torch.optim.Adam([
-            {'params': mask.parameters(), 'lr': 1e-3}, # Regular tuning of soft mask params.
-            {'params': [p for n, p in model.named_parameters() if not n.startswith("mask")], 'lr': 1e-5}  # Fine tuning
-        ])
+
+        # optimizer = optim.Adam([
+        #     {'params': mask.parameters(), 'lr': 1e-2}, # Regular tuning of soft mask params.
+        #     {'params': [p for n, p in model.named_parameters() if not n.startswith("mask")], 'lr': 1e-5}  # Fine tuning
+        # ])
+        optimizer = optim.Adam(model.parameters(), lr=1e-5)
         
         start = time.time()
         patience = 10
@@ -129,14 +175,14 @@ def mlps_train_eval(train, val, feature_extractor):
             train_loss = 0.0
             print('Epoch:', epoch)
             for batch in tqdm(train_loader, desc="Train", file=sys.stdout):
-                batch_X = {key: val.to(device) for key, val in batch.items() if key!='labels'}
-                batch_y = batch['labels'].to(device)
-                outputs = model(batch_X, batch_X, batch_y)
+                X = {key: val.to(device) for key, val in batch.items() if key!='labels'}
+                y = batch['labels'].to(device)
+                outputs = model(X, X, y)
 
                 if predictor=='dense' and label=='dx':
                     outputs = sigmoid(outputs).squeeze()
 
-                loss = criterion(outputs, batch_y)
+                loss = criterion(outputs, y)
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -150,23 +196,44 @@ def mlps_train_eval(train, val, feature_extractor):
             # Early stopping
             if epoch > start_after_epoch:
                 model.eval()
-                val_scores = []
+                y_val = []
+                y_hat_val = []
                 with torch.no_grad():
-                    for train_batch, val_batch in tqdm(zip(all_train_loader, val_loader), desc="Val", file=sys.stdout):
-                        X_train = {key: val.to(device) for key, val in train_batch.items() if key!='labels'}
-                        y_train = train_batch['labels'].to(device)
+                    if predictor_head == 'dense':
+                        for batch in val_loader:
+                            X = {key: val.to(device) for key, val in batch.items() if key!='labels'}
+                            y = batch['labels'].to(device)
+                            y_val.append(y)
+                            
+                            y_hat = model(X, X, y)
+                            y_hat_val.append(y_hat)
+                    else:
+                        z_train = []
+                        y_train = []
                         
-                        X_val = {key: val.to(device) for key, val in val_batch.items() if key!='labels'}
-                        y_val = val_batch['labels'].to(device)
-                        
-                        y_hat_val = model(X_val, X_train, y_train)  
-                        if predictor=='dense' and label=='dx':
-                            y_hat_val = sigmoid(y_hat_val).squeeze()
-                        
-                        val_scores.append(score(y_hat_val, y_val))
+                        for batch in train_loader: # Get embeddings for full train set
+                            X = {key: val.to(device) for key, val in batch.items() if key!='labels'}
+                            y = batch['labels'].to(device)                            
+                            y_train.append(y)
 
-                val_score = sum(val_scores) / len(val_scores)
+                            _, z, _ = model(X, sliced(X), sliced(y), get_embeddings=True)
+                            z_train.append(z)
+                        
+                        z_train = torch.cat(z_train, dim=0)
+                        y_train = torch.cat(y_train, dim=0)
 
+                        for batch in val_loader:
+                            X = {key: val.to(device) for key, val in batch.items() if key!='labels'}
+                            y = batch['labels'].to(device)
+                            y_val.append(y)
+                           
+                            _, z, _ = model(X, sliced(X), sliced(y), get_embeddings=True)
+                            y_hat = torch.clip(model.nona.output_layer(z, z_train, y_train), 0, 1)
+                            y_hat_val.append(y_hat)
+                        
+                y_val = torch.cat(y_val, dim=0)
+                y_hat_val = torch.cat(y_hat_val, dim=0)
+                val_score = score(y_hat_val, y_val)
                 if val_score > best_val_score:
                     best_val_score = val_score
                     best_model_state = deepcopy(model.state_dict())
@@ -176,35 +243,48 @@ def mlps_train_eval(train, val, feature_extractor):
                 report = report + f': Val Score: {abs(val_score): .5f}'
             
             print(report)
-            # if hasattr(model.nona.output_layer, 'mask'):
-            #     print(f'k = {(model.nona.output_layer.mask.k.data).item()}, s = {(model.nona.output_layer.mask.s.data).item()}')
             epoch += 1
         
         print("Evaluating", predictor_head) 
-        y_hats = []
-        y_tests = []
+        z_test = []
+        y_test = []
+        y_hat_test = []
         model.load_state_dict(best_model_state)
         with torch.no_grad():
-            for train_batch, test_batch in tqdm(zip(all_train_loader, test_loader), desc="Test", file=sys.stdout):
-                X_train = {key: val.to(device) for key, val in train_batch.items() if key!='labels'}
-                y_train = train_batch['labels'].to(device)
+            if predictor=='dense':
                 
-                X_test = {key: val.to(device) for key, val in test_batch.items() if key!='labels'}
-                y_test = test_batch['labels'].to(device)
-                
-                y_hat_batch, z_test, z_train = model(X_test, X_train, y_train, get_embeddings=True)
-                
-                if label=='dx':
-                    y_hat_batch = sigmoid(y_hat_batch).squeeze()  
+                z_train = []
+                y_train = []
 
-                y_hats.append(y_hat_batch)
-                y_tests.append(y_test)
+                for batch in train_loader:
+                    X = {key: val.to(device) for key, val in batch.items() if key!='labels'}
+                    y = batch['labels'].to(device)              
+                    y_train.append(y)
 
-        y_hat = torch.cat(y_hats, dim=0)
-        y_test = torch.cat(y_tests, dim=0)
+                    _, z, _ = model(X, sliced(X), sliced(y), get_embeddings=True)
+                    z_train.append(z)
+
+                z_train = torch.cat(z_train, dim=0)
+                y_train = torch.cat(y_train, dim=0)
+
+            for i, batch in enumerate(test_loader):
+                X = {key: val.to(device) for key, val in batch.items() if key!='labels'}
+                y = batch['labels'].to(device)              
+                y_test.append(y)
+
+                y_hat, z, _ = model(X, sliced(X), sliced(y), get_embeddings=True)
+                y_hat_test.append(y_hat)
+                z_test.append(z)
+
+                if predictor == 'nona':
+                    y_hat = torch.clip(model.nona.output_layer(z, z_train, y_train), 0, 1)
+                    y_hat_test[i] = y_hat
+            
+        z_test = torch.cat(z_test, dim=0)
+        y_test = torch.cat(y_test, dim=0)
+        y_hat_test = torch.cat(y_hat_test, dim=0)
         end = time.time()
-        
-        scores[f'{predictor_head} mlp'] = [score(y_hat, y_test), end-start]
+        scores[f'{predictor_head} mlp'] = [score(y_hat_test, y_test), end-start]
         
         print(f"Training and evaluating tuned knn with {predictor_head} final embeddings.") 
         start = time.time()
@@ -212,12 +292,17 @@ def mlps_train_eval(train, val, feature_extractor):
         end = time.time()
         scores[f'{predictor_head} tuned knn'] = [score(y_hat_knn, y_test), end-start]
         
+        print(f'Test scores: {scores}')
+
         if save_models:
             model_path = f'results/{dataset}/{label}/models/{script_start_time}/{predictor_head}_{seed}.pth'
             model_dir = os.path.dirname(model_path)
             if not os.path.exists(model_dir):
                 os.makedirs(model_dir)
-            torch.save(model.state_dict(), model_path)
+            model_objs = {'model weights': model.state_dict(),
+            'z_train': z_train, 'z_test': z_test, 
+            'y_train': y_train, 'y_test': y_test}
+            torch.save(model_objs, model_path)
 
     return scores
 
@@ -233,24 +318,29 @@ if __name__ == '__main__':
     save_models = args.savemodels
     seeds = args.seeds
 
+    if dataset == 'drugs':
+        label = None
+
     script_start_time = time.strftime("%m%d%H%M")
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    task, data_df, fe, tokenizer = load_data_params(dataset, label)
+    task, fe, tokenizer = load_data_params(dataset, label)
     
-    crit_dict = {'binary': [nn.BCELoss, 'f1'],
-                 'multiclass': [nn.CrossEntropyLoss, 'accuracy'],
-                 'ordinal': [nn.MSELoss, 'accuracy'],
-                 'regression': [nn.MSELoss, 'mse']}
+    crit_dict = {'binary': [BCELoss, 'f1'],
+                 'multiclass': [CrossEntropyLoss, 'accuracy'],
+                 'ordinal': [MSELoss, 'accuracy'],
+                 'regression': [MSELoss, 'mse']}
     score = Score(crit_dict[task][1])
 
-    results_path = f'results/{dataset}/{label}/scores_{script_start_time}.pkl'
+    results_path = f'results/{dataset}/scores_{script_start_time}.pkl'
+    if label is not None:
+        results_path = f'results/{dataset}/{label}/scores_{script_start_time}.pkl'
     results_dir = os.path.dirname(results_path)
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)
     
-    scores_list = ["mask with var lr, bn, and tuned knn."]
+    scores_list = ["SoftPointWiseKNN"]
 
     for seed in range(seeds):
         print(f'Training and evaluating models for split {seed+1}.')
