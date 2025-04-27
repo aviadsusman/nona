@@ -8,10 +8,10 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.metrics import accuracy_score, mean_squared_error, f1_score, auc
 import pandas as pd
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoModel
 import torchvision
 import torchvision.transforms as transforms
-from torchvision.models import resnet18, resnet34, resnet50
+from torchvision.models import resnet18 #, resnet34, resnet50
 from torch.utils.data import Dataset, DataLoader, random_split
 import numpy as np
 
@@ -48,39 +48,30 @@ class Score(torch.nn.Module):
 
         return output if self.higher_is_better else - output
 
-def load_data_params(dataset, label=None):
+def data_params(dataset, label='mmse'):
     if dataset == 'adresso':
         if label == 'mmse':
             task = 'regression'
         elif label=='dx':
             task = 'binary'
-        
-        data_df = pd.read_parquet('data/adresso/x_y.parquet')
-        tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+    
         fe = AutoModel.from_pretrained
-        
-        return task, fe, tokenizer
     
     if dataset == 'drugs':
         task = 'regression'
-        tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased") # "huawei-noah/TinyBERT_General_4L_312D"
         fe = AutoModel.from_pretrained
-
-        return task, fe, tokenizer
     
     elif dataset == 'rsna':
         task = 'regression'
         fe = resnet18
-
-        return task, fe
     
     elif dataset == 'cifar':
         task = 'multiclass'
         fe = resnet18
 
-        return task, fe
+    return task, fe
 
-def get_folds(dataset, seed, label=None):
+def folds(dataset, seed, label='mmse'):
     if dataset == 'rsna':
         data_df = pd.read_csv('data/rsna/all_features.csv')
         fold_dict = {}

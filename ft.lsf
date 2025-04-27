@@ -1,0 +1,30 @@
+#!/bin/bash
+#BSUB -P acc_pandeg01a
+#BSUB -q gpu
+#BSUB -R span[hosts=1]
+#BSUB -R h100nvl
+#BSUB -R rusage[mem=48000]
+#BSUB -n 1
+#BSUB -gpu num=2
+#BSUB -J test
+#BSUB -W 96:00
+#BSUB -o /sc/arion/projects/pandeg01a/susmaa01/nona/outputs/_%J.stdout
+#BSUB -eo /sc/arion/projects/pandeg01a/susmaa01/nona/outputs/_%J.stderr
+
+START_TIME=${START_TIME:-$(date "+%Y-%m-%d_%H-%M-%S")}
+
+echo "salve mundi"
+cd /sc/arion/projects/pandeg01a/susmaa01/nona
+source .venv/bin/activate
+ml cuda/12.1.1
+ml cudnn/8.9.5-11
+export XLA_FLAGS=--xla_gpu_cuda_data_dir=/hpc/packages/minerva-centos7/cuda/12.0.1
+
+python3 ft.py \
+        --dataset 'adresso' \
+        --predictor 'cos' \
+        --mask 'pointwise_mlp' \
+        --optimization 'lr3' \
+        --batch_size '32' \
+        --seed '0' \
+        --start_time $START_TIME

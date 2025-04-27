@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 from torch.nn.functional import softmax, one_hot, normalize
-from similarity_masks import SoftKNNMask, HardKNNMask, SoftSimMask, HardSimMask, SoftPointwiseKNN, LnSmoothStep
+from similarity_masks import SoftKNNMask, HardKNNMask, HardSimMask, SoftPointwiseKNN, PointwiseSoftMask, UniformSoftMask
+from similarity_masks import sim_matrix
 
 class NONA(nn.Module):
     '''
@@ -35,9 +36,6 @@ class NONA(nn.Module):
         Account for aggregation strategy in multiclass prediction.
         '''
         if not self.agg: 
-            if isinstance(self.mask, LnSmoothStep):
-                sim = sim.log()
-
             if train:
                 inf_id = torch.diag(torch.full((len(sim),), torch.inf)).to(self.device)
                 sim -= inf_id
@@ -55,8 +53,8 @@ class NONA(nn.Module):
                 class_sums = (class_sums - 1).clamp(min=1)            
 
             sim_scores = sim @ y_n
-            if isinstance(self.mask, LnSmoothStep):
-                sim = sim.log()
+            # if isinstance(self.mask, PointwiseSoftStep):
+            #     sim = sim.log()
 
             return softmax(sim_scores, dim=1)
         
@@ -66,29 +64,14 @@ class NONA(nn.Module):
             x_n = self.bn(x_n)
 
         # Create similarity matrix between embeddings of X and embeddings of X_n
-
-        if isinstance(self.mask, (SoftPointwiseKNN, LnSmoothStep)):
-            sim = self.mask(x,x_n)
-
+        if self.mask:
+            sim = self.mask(x, x_n, similarity=self.similarity)
         else:
-            if self.similarity == 'l2':
-                sim = - torch.cdist(x, x_n, p=2)
-            elif self.similarity == 'l1':
-                sim = - torch.cdist(x, x_n, p=1)
-            elif self.similarity == 'dot':
-                # Divide by magnitude of max/min sims from dot prod for numerical stability
-                sim = x @ torch.t(x_n) / x.shape[1]
-            elif self.similarity == 'cos':
-                x_norm = normalize(x, p=2, dim=1)
-                x_n_norm = normalize(x_n, p=2, dim=1)
-                sim = x_norm @ torch.t(x_n_norm)
-            
-            # Apply a soft mask to discount low similarities
-            if self.mask:
-                sim = self.mask(sim)
-        
+            sim = sim_matrix(x, x_n, similarity=self.similarity)
+
         train = torch.equal(x, x_n)
-        return self.softmax_predict(sim, y_n, train)
+        output = self.softmax_predict(sim, y_n, train)
+        return torch.clip(output, 0,1)
 
 class NONA_NN(nn.Module):
     '''
@@ -122,7 +105,7 @@ class NONA_NN(nn.Module):
             if hasattr(self.mask, 'min_max'): # Determine size of final embedding space for similarity normalization
                 self.output_layer.mask.min_max(similarity=self.similarity, activation='tanh', d=layer_dims[-1])
             
-            if hasattr(self.mask, 'input_dim'):
+            if hasattr(self.mask, 'dims'):
                 self.output_layer.mask.build_params(layer_dims[-1])
                 self.output_layer.mask.to(self.device).to(self.dtype)
         
@@ -132,19 +115,19 @@ class NONA_NN(nn.Module):
             else:
                 self.output_layer = nn.Linear(layer_dims[-1], 1, dtype=self.dtype, device=self.device)
 
-    def forward(self, x, x_n, y_n, get_embeddings=False):
+    def forward(self, x, x_n, y_n, embeddings=False):
         if self.hl_sizes != list():
             for layer, norm in zip(self.fcn, self.norms):
                 x = self.activation(layer(norm(x)))
 
-                if self.predictor=='nona' or get_embeddings==True:
+                if self.predictor=='nona' or embeddings==True:
                     x_n = self.activation(layer(norm(x_n)))
             
         if self.predictor=='nona':
             if self.multiclass:            
                 y_n = one_hot(y_n.long()).to(self.device, self.dtype)
 
-            output = torch.clip(self.output_layer(x, x_n, y_n), 0, 1)
+            output = self.output_layer(x, x_n, y_n)
         
         elif self.predictor=='dense':
             logits = self.output_layer(x)
@@ -154,13 +137,13 @@ class NONA_NN(nn.Module):
             else:
                 output = logits.squeeze()
 
-        if get_embeddings:
+        if embeddings:
             output = [output, x, x_n]
         
         return output
 
 class NONA_FT(nn.Module):
-    def __init__(self, feature_extractor, hl_sizes=list(), predictor='nona', similarity='l2', mask=None, multiclass=None, agg=None, dtype=torch.float64):
+    def __init__(self, feature_extractor, hl_sizes=list(), predictor='nona', similarity=None, mask=None, multiclass=None, agg=None, dtype=torch.float64):
         '''
         Attach a feature extractor to a NONA neural network.
         '''
@@ -192,18 +175,18 @@ class NONA_FT(nn.Module):
             agg=self.agg, 
             dtype=self.dtype)
 
-    def forward(self, x, x_n, y_n, get_embeddings=False):
+    def forward(self, x, x_n, y_n, embeddings=False):
         if isinstance(x, dict): # bert style text transformer
             x = self.feature_extractor(**x).last_hidden_state[:,0,:]
-            if self.predictor == 'nona' or get_embeddings == True:
+            if self.predictor == 'nona' or embeddings == True:
                 x_n = self.feature_extractor(**x_n).last_hidden_state[:,0,:]
         
         else: # cnn
             x = self.feature_extractor(x)
-            if self.predictor == 'nona' or get_embeddings == True:
+            if self.predictor == 'nona' or embeddings == True:
                 x_n = self.feature_extractor(x_n)   
 
-        return self.nona(x, x_n, y_n, get_embeddings)
+        return self.nona(x, x_n, y_n, embeddings)
 
 def get_output_size(model):
     ''' Finds the number of output features of a feature extractor'''
@@ -214,5 +197,3 @@ def get_output_size(model):
         return module.out_features
     elif hasattr(module, 'normalized_shape'):
         return module.normalized_shape[0]
-    elif isinstance(module, nn.Tanh): # tiny bert
-        return 312

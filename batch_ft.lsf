@@ -1,0 +1,62 @@
+#BSUB -P acc_pandeg01a
+#BSUB -q premium
+#BSUB -n 1
+#BSUB -W 1:00
+#BSUB -o /sc/arion/projects/pandeg01a/susmaa01/nona/outputs/outputs.stdout
+#BSUB -eo /sc/arion/projects/pandeg01a/susmaa01/nona/outputs/outputs.stderr
+
+dataset="rsna"
+START_TIME=${START_TIME:-$(date "+%Y-%m-%d_%H-%M-%S")}
+
+# Configuration
+predictors=("l2" "l1" "dot" "cos") # Manual changes for dense
+masks=("uniform" "pointwise" "pointwise_mlp") # Manual changes for no mask
+optimizations=("uniform" "lr4" "lr3")
+batches=("64" "128" "256" "512")
+
+for predictor in "${predictors[@]}"; do
+    for mask in "${masks[@]}"; do
+        for optimization in "${optimizations[@]}"; do
+            for batch in "${batches[@]}"; do
+                for seed in {0..9}; do
+                    
+                    command="python3 ft_cnn.py \
+                             --dataset $dataset \
+                             --predictor $predictor \
+                             --mask $mask \
+                             --optimization $optimization \
+                             --batch_size $batch \
+                             --seed $seed \
+                             --start_time $START_TIME"
+                    
+                    name="${dataset}_${predictor}_${mask}_${optimization}_${batch}_${seed}"
+
+                    bsub <<EOF
+
+#!/bin/bash
+#BSUB -P acc_pandeg01a
+#BSUB -q gpu
+#BSUB -R span[hosts=1]
+#BSUB -R h100nvl
+#BSUB -R rusage[mem=48000]
+#BSUB -n 1
+#BSUB -gpu num=1
+#BSUB -W 12:00
+#BSUB -J $name
+#BSUB -o /sc/arion/projects/pandeg01a/susmaa01/nona/outputs/${START_TIME}_${name}.stdout
+#BSUB -eo /sc/arion/projects/pandeg01a/susmaa01/nona/outputs/${START_TIME}_${name}.stderr
+
+echo "salve mundi"
+cd /sc/arion/projects/pandeg01a/susmaa01/nona
+source .venv/bin/activate
+ml cuda/12.1.1
+ml cudnn/8.9.5-11
+export XLA_FLAGS=--xla_gpu_cuda_data_dir=/hpc/packages/minerva-centos7/cuda/12.0.1
+$command
+
+EOF
+                done
+            done
+        done
+    done
+done

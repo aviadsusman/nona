@@ -1,19 +1,34 @@
 import torch
 import torch.nn as nn
 
+def sim_matrix(x, x_n, similarity):
+    if similarity == 'l2':
+        sim = - torch.cdist(x, x_n, p=2)
+    elif similarity == 'l1':
+        sim = - torch.cdist(x, x_n, p=1)
+    elif similarity == 'dot':
+        sim = x @ torch.t(x_n) / x.shape[1]
+    elif similarity == 'cos':
+        x_norm = nn.functional.normalize(x, p=2, dim=1)
+        x_n_norm = nn.functional.normalize(x_n, p=2, dim=1)
+        sim = x_norm @ torch.t(x_n_norm)
+    
+    return sim
+
 class SoftKNNMask(nn.Module):
     '''
     Shift similarities by rankings.
     '''
-    def __init__(self):
+    def __init__(self, eps=1e-12):
         super(SoftKNNMask, self).__init__()
         self.params = nn.Parameter(torch.normal(0,1,(2,)))
         self.eps = eps
 
-    def forward(self, sim):
-        # Converges to SoftSimMask when embedding space is sparse
+    def forward(self, x, x_n, similarity):
+        sim = sim_matrix(x,x_n, similarity)
+
         sim_norm = (sim - sim.min(dim=1).values[:,None]) / (sim.max(dim=1).values - sim.min(dim=1).values)[:,None]
-        sim_norm = sim_norm.clamp(min=1e-12) # To avoid log 0 error
+        sim_norm = sim_norm.clamp(self.eps) # To avoid log 0 error
 
         # self.k.exp() # equivalent to sig(k) / (1 - sig(k)). Allows mask to range over full space.
         
@@ -41,16 +56,11 @@ class SoftPointwiseKNN(nn.Module):
         self.input_dim = input_dim
         self.knn = nn.Linear(input_dim, 2)
 
-    def forward(self, x, x_n):
+    def forward(self, x, x_n, similarity):
         params = torch.sigmoid(self.knn(x))
         k, t = [col.unsqueeze(-1).clamp(min=self.eps, max=1-self.eps) for col in params.T]
 
-        if self.similarity == 'l2':
-            sim = - torch.cdist(x, x_n, p=2)
-        elif self.similarity == 'l1':
-            sim = - torch.cdist(x, x_n, p=1)
-        elif self.similarity == 'dot':
-            sim = x @ torch.t(x_n) / x.shape[1]
+        sim = sim_matrix(x,x_n, similarity)
         
         # Normalize sim for interpretable k param
         sim_min = sim.min(dim=1, keepdim=True).values
@@ -72,7 +82,8 @@ class HardKNNMask(nn.Module):
         self.k = k + 1 # K nearest neighbors + self similarity. Remove diagonal after. 
         self.agg = agg
     
-    def forward(self, sim):
+    def forward(self, x, x_n, similarity):
+        sim = sim_matrix(x,x_n)
         top_k_values, top_k_indices = torch.topk(sim, self.k, dim=1)
 
         if self.agg is None: # Subtract off inf from all sims outside topk before softmax
@@ -84,25 +95,6 @@ class HardKNNMask(nn.Module):
             mask = torch.full_like(sim, 0)
             mask.scatter_(1, top_k_indices, 1)
             return sim * mask
-
-class SoftSimMask(nn.Module):
-    '''
-    Shift similarities by absolute similarity.
-    '''
-    def __init__(self):
-        super(SoftSimMask, self).__init__()
-        self.k = nn.Parameter(torch.randn(1))
-        
-    def min_max(self, similarity, activation, d):
-        self.min, self.max = get_min_max(similarity, activation, d)
-    
-    def forward(self, sim):
-        sim_norm = (sim - self.min) / (self.max - self.min)
-        
-        # k = self.k.exp() # equivalent to sig(k) / (1 - sig(k)). Allows mask to range over full space.
-        sim_mask = (self.k ** 2) * (sim_norm).log()
-
-        return sim + sim_mask
 
 class HardSimMask(nn.Module):
     '''
@@ -123,13 +115,109 @@ class HardSimMask(nn.Module):
         '''
         return (self.max - self.min) * k + self.min
     
-    def forward(self, sim):
+    def forward(self, x, x_n, similarity):
+        sim = sim_matrix(x,x_n)
         mask = (sim < self.get_min_sim(self.k))
         if self.agg is None:
             mask = mask.float().masked_fill(mask == 1, float('inf'))
             return sim - mask
         elif self.agg == 'mean':
             return sim * (1 - mask)
+
+class PointwiseSoftMask(nn.Module):
+    def __init__(self, mask_function=None, dims=None, eps=1e-12):
+        super(PointwiseSoftMask, self).__init__()
+        self.mask_function = mask_function
+        if isinstance(dims, int):
+            dims = [dims]
+        self.dims = dims
+        self.eps = eps
+        
+        if self.dims:
+            self.build_params(self.dims)
+        
+    def build_params(self, dims):
+        if isinstance(dims, int):
+            dims = [dims]
+        if self.dims is None:
+            self.dims = dims
+
+        layers = []
+        if len(dims) == 1:
+            layers.append(nn.Linear(dims[0], 3))
+            layers.append(nn.Sigmoid())
+        else:
+            for in_dim, out_dim in zip(dims[:-1], dims[1:]):
+                layers.append(nn.Linear(in_dim, out_dim))
+                layers.append(nn.Sigmoid())
+            layers.append(nn.Linear(dims[-1], 3))
+            layers.append(nn.Sigmoid())
+
+        self.params = nn.Sequential(*layers)
+
+    def forward(self, x, x_n, similarity):
+        params = self.params(x).clamp(min=self.eps, max=1-self.eps)
+        a,b,s = [col.unsqueeze(-1) for col in params.T]
+        b = a + b * (1-a) # Ensure 0 < a < b < 1
+
+        # Get normalized similarities
+        sim = sim_matrix(x,x_n, similarity)
+        sim_norm = norm_sim(sim)
+
+        # Adjust a to ensure at least one neighbor for comparison
+        if torch.equal(x,x_n): # train
+            top_sims = (sim_norm - sim_norm.diag().diag()).max(dim=1)[0]
+        else:
+            top_sims = sim_norm.max(dim=1)[0]
+        a = torch.minimum(a, top_sims.unsqueeze(-1)) - self.eps
+
+        # Compute softmask
+        num = torch.abs(sim_norm - a).pow(1 / s).clamp(self.eps)
+        denom = num + torch.abs(b - sim_norm).pow(1 / s).clamp(self.eps)
+        soft_mask = num / denom
+
+        soft_mask[sim_norm < a] = 0
+        soft_mask[sim_norm > b] = 1
+
+        return sim + soft_mask.log()
+
+class UniformSoftMask(nn.Module):
+    def __init__(self, mask_function=None, eps=1e-12): # make one a,b,s mask with passed in function
+        super(UniformSoftMask, self).__init__()
+        self.mask_function = mask_function
+        self.eps = eps
+        self.params = nn.Parameter(torch.normal(0,1,(3,)))
+
+    def forward(self, x, x_n, similarity):
+        a,b,s = torch.sigmoid(self.params).clamp(self.eps, 1 - self.eps)
+        b = a + b * (1-a) # Ensure 0 < a < b < 1
+
+        # Get normalized similarities
+        sim = sim_matrix(x,x_n, similarity)
+        sim_norm = norm_sim(sim)
+        
+        # Adjust a to ensure at least one neighbor for comparison
+        if torch.equal(x,x_n):
+            top_sims = (sim_norm - sim_norm.diag().diag()).max(dim=1)[0]
+        else:
+            top_sims = sim_norm.max(dim=1)[0]
+        a = torch.min(a, top_sims.min()) - self.eps
+
+        # Compute softmask
+        num = torch.abs(sim_norm - a).pow(1 / s).clamp(self.eps)
+        denom = num + torch.abs(b - sim_norm).pow(1 / s).clamp(self.eps)
+        soft_mask = num / denom
+
+        soft_mask[sim_norm < a] = 0
+        soft_mask[sim_norm > b] = 1
+
+        return sim + soft_mask.log()
+
+def norm_sim(sim):
+    sim_min = sim.min(dim=1, keepdim=True)[0]
+    sim_max = sim.max(dim=1, keepdim=True)[0]
+    sim_norm = (sim - sim_min) / (sim_max - sim_min)
+    return sim_norm
 
 def get_min_max(similarity, activation, d):
     '''
@@ -161,91 +249,17 @@ def get_min_max(similarity, activation, d):
         
     return min_similarity, max_similarity
 
-class SoftSigMask(nn.Module):
-    '''
-    General S shaped function from I to I.
-    https://www.desmos.com/calculator/ba2kqqpnih
-    '''
-    def __init__(self):
-        super().__init__()
-        self.a = nn.Parameter(torch.randn(1))
-        self.b = nn.Parameter(torch.randn(1))
-        self.n = nn.Parameter(torch.randn(1))
-    
-    def min_max(self, similarity, activation, d):
-        self.min, self.max = get_min_max(similarity, activation, d)
+def sigmoidal(sim_norm, a, b, s, eps=1e-12):
+    num = torch.abs(sim_norm - a).pow(1 / s).clamp(eps)
+    denom = num + torch.abs(b - sim_norm).pow(1 / s).clamp(eps)
+    soft_mask = num / denom
 
-    def forward(self, sim):
-        # Ensure 0 < a < b < 1
-        a = torch.sigmoid(self.a)
-        b = a + torch.sigmoid(self.b) * (1 - a)
-        n = torch.sigmoid(self.n)
+    return soft_mask
 
-        sim_norm = (sim - self.min) / (self.max - self.min)
+def exponential(sim_norm, a, b, s, eps=1e-12):
+    arg = ((b - sim_norm) / (sim_norm - a)) ** 2
+    soft_mask = s ** arg
+    # mask = torch.where(sim_norm < a, torch.tensor(0.0, device=mask.device), mask)
+    # mask = torch.where(sim_norm > b, torch.tensor(1.0, device=mask.device), mask)
 
-        num = (sim_norm - a).clamp(min=1e-6).pow(1 / n)  # Avoid zero issues
-        denom = num + (b - sim_norm).clamp(min=1e-6).pow(1 / n)
-
-        soft_mask = num / denom
-
-        output = torch.where(sim_norm < a, torch.tensor(0.0, device=sim_norm.device), soft_mask)
-        output = torch.where(sim_norm > b, torch.tensor(1.0, device=sim_norm.device), output)
-
-        return soft_mask
-
-class LnSmoothStep(nn.Module):
-    '''
-    Smooth step function from I to R≤0.
-    https://www.desmos.com/calculator/ba2kqqpnih
-    '''
-    def __init__(self, input_dim=None, eps=1e-12):
-        super(LnSmoothStep, self).__init__()
-        self.input_dim = input_dim
-        self.eps = eps
-        
-        if self.input_dim:
-            self.params = nn.Linear(input_dim, 3)
-        
-    def build_params(self, input_dim):
-        assert self.input_dim is None
-        self.input_dim = input_dim
-        self.params = nn.Linear(input_dim, 3)
-    
-    def min_max(self, similarity, activation, d):
-        self.min, self.max = get_min_max(similarity, activation, d)
-        self.similarity = similarity
-
-    def forward(self, x, x_n):
-        params = torch.sigmoid(self.params(x)).clamp(min=self.eps, max=1-self.eps)
-        a,b,n = [col.unsqueeze(-1) for col in params.T]
-        b = a + b * (1-a) # Ensure 0 < a < b < 1
-
-        train = torch.equal(x,x_n)
-        if self.similarity == 'l2':
-            sim = - torch.cdist(x, x_n, p=2)
-        elif self.similarity == 'l1':
-            sim = - torch.cdist(x, x_n, p=1)
-        elif self.similarity == 'dot':
-            sim = x @ torch.t(x_n) / x.shape[1]
-
-        sim_norm = (sim - self.min) / (self.max - self.min)
-        
-        # Ensure at least one normalized similarity > a (k!=0 in knn terms)
-        if train:
-            sim_norm.diagonal().copy_(torch.full((sim_norm.size(0),), 1))
-            max_a = torch.where(sim_norm==1, 0, sim_norm).max(dim=1)[0]
-        else:
-            max_a = sim_norm.max(dim=1)[0]
-        a = torch.minimum(a, max_a.unsqueeze(-1)) - self.eps
-
-        # Abs to avoid raising negs to non-int powers. 
-        # Values outside [a,b] will be corrected after
-        num = torch.abs(sim_norm - a).pow(1 / n).clamp(self.eps)
-        denom = num + torch.abs(b - sim_norm).pow(1 / n).clamp(self.eps)
-        sim_score = num / denom
-        # Equivalently sigmoid(1/n * ln((x-a) / (b-x)))
-
-        sim_score[sim_norm < a] = 0
-        sim_score[sim_norm > b] = 1
-        
-        return sim_score#.log()
+    return soft_mask

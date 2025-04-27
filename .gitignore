@@ -6,3 +6,5 @@ outputs
 data
 results
 requirements.txt
+debug_notebooks
+old_scripts
